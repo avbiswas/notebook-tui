@@ -26,6 +26,19 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 .eslintcache
 .cache
 *.tsbuildinfo
+__pycache__/
+*.pyc
+*.pyo
+
+# local Python environments
+.venv/
+**/.venv/
+
+# notebook / render artifacts
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+*.mp4
+remotion/public/timeline.json
 
 # IntelliJ based IDEs
 .idea

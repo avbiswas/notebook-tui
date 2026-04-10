@@ -1,10 +1,17 @@
 {
-  "name": "/tmp/notebook-tui-scaffold",
+  "name": "notebook-tui",
   "module": "src/index.tsx",
   "type": "module",
   "private": true,
+  "bin": {
+    "ntui": "bin/ntui.ts"
+  },
   "scripts": {
-    "dev": "bun run --watch src/index.tsx"
+    "dev": "bun run --watch src/index.tsx",
+    "start": "bun run src/index.tsx",
+    "render": "bun run src/render.tsx",
+    "video": "bun run src/render-video.ts",
+    "init-template": "bun run src/init-template.ts"
   },
   "devDependencies": {
     "@types/bun": "latest"
@@ -13,8 +20,10 @@
     "typescript": "^5"
   },
   "dependencies": {
+    "@napi-rs/canvas": "^0.1.97",
     "@opentui/core": "^0.1.97",
     "@opentui/react": "^0.1.97",
-    "react": "^19.2.4"
+    "react": "^19.2.4",
+    "yaml": "^2.8.3"
   }
 }
