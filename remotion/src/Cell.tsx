@@ -57,7 +57,7 @@ export function buildTypingSchedule(source: string, fps: number): number[] {
   return schedule;
 }
 
-const CellOutput: React.FC<{
+export const CellOutput: React.FC<{
   output: CellState["outputs"][number];
   scale: number;
   fontSize: number;
@@ -203,11 +203,13 @@ export const Cell: React.FC<{
   typingFrame?: number;
   outputFrame: number | null;
   animationMode?: AnimationMode;
+  sourceFade?: boolean;
+  inlineOutputVisible?: boolean;
   scale?: number;
   fontSize?: number;
   collapsed?: boolean;
   maxOutputLines?: number;
-}> = ({ cell, index, total, focusFrame, typingFrame, outputFrame, animationMode = "char", scale: s = 1, fontSize = 16, collapsed = false, maxOutputLines = 10 }) => {
+}> = ({ cell, index, total, focusFrame, typingFrame, outputFrame, animationMode = "char", sourceFade = false, inlineOutputVisible = true, scale: s = 1, fontSize = 16, collapsed = false, maxOutputLines = 10 }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
@@ -310,19 +312,25 @@ export const Cell: React.FC<{
   const spinnerChar = spinnerChars[spinnerIdx];
 
   // Output entrance: single spring for all outputs at once
-  const outputVisible = cell.outputs.length > 0 && outputFrame !== null && frame >= outputFrame;
+  const outputVisible = inlineOutputVisible && cell.outputs.length > 0 && outputFrame !== null && frame >= outputFrame;
   const outputEntrance = outputVisible
     ? spring({ frame, fps, delay: outputFrame!, config: { damping: 200 } })
     : 0;
   const outputOpacity = interpolate(outputEntrance, [0, 1], [0, 1]);
   const outputTranslateY = interpolate(outputEntrance, [0, 1], [8, 0]);
+  const sourceFadeProgress =
+    sourceFade && hasFocused
+      ? spring({ frame, fps, delay: typeStart, config: { damping: 200 } })
+      : 1;
+  const sourceOpacity = sourceFade ? interpolate(sourceFadeProgress, [0, 1], [0, 1]) : 1;
+  const sourceTranslateY = sourceFade ? interpolate(sourceFadeProgress, [0, 1], [10, 0]) : 0;
 
   // --- Collapsed view: compact single-line summary ---
   if (collapsed) {
     const firstLine = lines[0] || "";
     const lineCount = lines.length;
     const collapsedTokens = (tokenizedLines[0] || []);
-    const outputVisible = cell.outputs.length > 0 && outputFrame !== null && frame >= outputFrame;
+    const outputVisible = inlineOutputVisible && cell.outputs.length > 0 && outputFrame !== null && frame >= outputFrame;
     const outputEntrance = outputVisible
       ? spring({ frame, fps, delay: outputFrame!, config: { damping: 200 } })
       : 0;
@@ -415,7 +423,14 @@ export const Cell: React.FC<{
       </div>
 
       {/* Source with line numbers */}
-      <div style={{ display: "flex", gap: 12 * s }}>
+      <div
+        style={{
+          display: "flex",
+          gap: 12 * s,
+          opacity: sourceOpacity,
+          transform: `translateY(${sourceTranslateY}px)`,
+        }}
+      >
         <div
           style={{
             color: monokai.muted,

@@ -11,8 +11,9 @@ import {
   useVideoConfig,
 } from "remotion";
 import { monokai } from "./theme";
-import { Cell, buildTypingSchedule } from "./Cell";
+import { Cell, CellOutput, buildTypingSchedule } from "./Cell";
 import { MarkdownCell } from "./MarkdownCell";
+import { PreviewOverlay } from "./PreviewOverlay";
 import type { Timeline, CellState, TimelineEvent, AnimationMode } from "./types";
 
 export type NotebookProps = {
@@ -24,8 +25,29 @@ export type NotebookProps = {
 };
 
 const SCROLL_SETTLE_SECONDS = 0.5;
+const PREVIEW_DELAY_SECONDS = 0.7;
+const PREVIEW_EXIT_SECONDS = 0.45;
+
+function getCellAnimationMode(cell: Pick<CellState, "commands">, fallback: AnimationMode): AnimationMode {
+  const inputMode = cell.commands?.input;
+  if (inputMode === "present") {
+    return "present";
+  }
+  if (inputMode === "fade") {
+    return "block";
+  }
+  if (inputMode === "block" || inputMode === "line" || inputMode === "word" || inputMode === "char") {
+    return inputMode;
+  }
+  return fallback;
+}
+
+function shouldPreviewOutput(cell: Pick<CellState, "commands">): boolean {
+  return cell.commands?.output === "preview";
+}
 
 function buildFramePlan(
+  cells: Timeline["cells"],
   events: TimelineEvent[],
   fps: number,
   animationMode: AnimationMode = "char",
@@ -66,17 +88,18 @@ function buildFramePlan(
     if (event.type === "focus") {
       currentFrame += Math.round(PAUSE_AFTER_FOCUS * fps);
     } else if (event.type === "source") {
+      const cellAnimationMode = getCellAnimationMode({ commands: cells[event.cellIndex]?.commands }, animationMode);
       // Record the source timestamp as the starting point for this cell's execution
       lastTsPerCell.set(event.cellIndex, event.ts);
 
-      if (animationMode === "present") {
+      if (cellAnimationMode === "present") {
         currentFrame += Math.round(0.2 * fps);
-      } else if (animationMode === "block") {
+      } else if (cellAnimationMode === "block") {
         currentFrame += Math.round(0.4 * fps);
-      } else if (animationMode === "line") {
+      } else if (cellAnimationMode === "line") {
         const lines = event.source.split("\n").length;
         currentFrame += Math.round((lines * 0.15) * fps);
-      } else if (animationMode === "word") {
+      } else if (cellAnimationMode === "word") {
         const words = event.source.split(/\s+/).length;
         currentFrame += Math.round((words / 8) * fps);
       } else {
@@ -277,11 +300,12 @@ export const NotebookComposition: React.FC<NotebookProps> = ({
   const frame = useCurrentFrame();
   const { fps, width, height } = useVideoConfig();
 
-  const { frameEvents } = buildFramePlan(timeline.events, fps, animationMode);
+  const { frameEvents } = buildFramePlan(timeline.cells, timeline.events, fps, animationMode);
 
   const cellStates: CellState[] = timeline.cells.map((c) => ({
     source: c.source,
     kind: c.kind ?? "code",
+    commands: c.commands,
     executionCount: null,
     outputs: [],
     focused: false,
@@ -289,6 +313,8 @@ export const NotebookComposition: React.FC<NotebookProps> = ({
   }));
 
   const scrollSettleFrames = Math.round(SCROLL_SETTLE_SECONDS * fps);
+  const previewDelayFrames = Math.round(PREVIEW_DELAY_SECONDS * fps);
+  const previewExitFrames = Math.round(PREVIEW_EXIT_SECONDS * fps);
 
   // -1 means "never focused yet"
   // focusFrames = when the scroll starts (cell becomes focused)
@@ -333,6 +359,16 @@ export const NotebookComposition: React.FC<NotebookProps> = ({
     }
   }
 
+  const focusSequence = frameEvents
+    .filter((entry): entry is { event: Extract<TimelineEvent, { type: "focus" }>; frame: number } => entry.event.type === "focus")
+    .map((entry) => ({ cellIndex: entry.event.cellIndex, frame: entry.frame }));
+  const nextFocusFrames: Array<number | null> = new Array(timeline.cells.length).fill(null);
+  for (let i = 0; i < focusSequence.length; i += 1) {
+    const current = focusSequence[i]!;
+    const next = focusSequence[i + 1];
+    nextFocusFrames[current.cellIndex] = next?.frame ?? null;
+  }
+
   // Scale all sizes proportionally to width (designed at 1920)
   const s = width / 1920;
 
@@ -360,12 +396,26 @@ export const NotebookComposition: React.FC<NotebookProps> = ({
         : !hasFocused
           ? 1
           : countWrappedLines(
-            cell.source.split("\n").slice(0, visibleSourceLineCount(cell.source, animationMode, fps, frame, typeStart)).join("\n"),
+            cell.source.split("\n").slice(
+              0,
+              visibleSourceLineCount(cell.source, getCellAnimationMode(cell, animationMode), fps, frame, typeStart),
+            ).join("\n"),
             sourceChars,
           );
+    const previewedOutput = shouldPreviewOutput(cell);
+    const previewStart = outputFrames[i] === null ? null : outputFrames[i]! + previewDelayFrames;
+    const previewEnd = nextFocusFrames[i];
+    const previewWindowActive =
+      previewedOutput &&
+      previewStart !== null &&
+      frame >= previewStart &&
+      (previewEnd === null || frame < previewEnd + previewExitFrames);
+    const cellMaxOutputLines = previewedOutput ? Number.MAX_SAFE_INTEGER : maxOutputLines;
     const outputHeight =
-      (outputFrames[i] !== null && frame >= outputFrames[i]!) || cell.outputs.length > 0
-        ? estimateOutputHeight(cell.outputs, s, fontSize, outputWidth, maxOutputLines)
+      previewWindowActive
+        ? 0
+        : (outputFrames[i] !== null && frame >= outputFrames[i]!) || cell.outputs.length > 0
+          ? estimateOutputHeight(cell.outputs, s, fontSize, outputWidth, cellMaxOutputLines)
         : 0;
 
     return estimateCellHeight(
@@ -414,6 +464,28 @@ export const NotebookComposition: React.FC<NotebookProps> = ({
   }
 
   const statusBarHeight = Math.round(40 * s);
+  let previewCellIndex: number | null = null;
+  for (let i = 0; i < cellStates.length; i += 1) {
+    const previewStart = outputFrames[i] === null ? null : outputFrames[i]! + previewDelayFrames;
+    const previewEnd = nextFocusFrames[i];
+    if (
+      shouldPreviewOutput(cellStates[i]!) &&
+      previewStart !== null &&
+      frame >= previewStart &&
+      (previewEnd === null || frame < previewEnd + previewExitFrames)
+    ) {
+      previewCellIndex = i;
+    }
+  }
+  const previewCell = previewCellIndex === null ? null : cellStates[previewCellIndex]!;
+  const previewStartFrame =
+    previewCellIndex !== null && outputFrames[previewCellIndex] !== null
+      ? outputFrames[previewCellIndex]! + previewDelayFrames
+      : 0;
+  const previewEndFrame =
+    previewCellIndex !== null
+      ? nextFocusFrames[previewCellIndex]
+      : null;
 
   return (
     <AbsoluteFill
@@ -472,12 +544,19 @@ export const NotebookComposition: React.FC<NotebookProps> = ({
                     total={cellStates.length}
                     focusFrame={focusFrames[i]!}
                     typingFrame={typingFrames[i]!}
-                    outputFrame={outputFrames[i]}
-                    animationMode={animationMode}
+                    outputFrame={outputFrames[i] ?? null}
+                    animationMode={getCellAnimationMode(cell, animationMode)}
+                    sourceFade={cell.commands?.input === "fade"}
+                    inlineOutputVisible={
+                      !shouldPreviewOutput(cell) ||
+                      outputFrames[i] === null ||
+                      frame < outputFrames[i]! + previewDelayFrames ||
+                      (nextFocusFrames[i] !== null && frame >= nextFocusFrames[i]! + previewExitFrames)
+                    }
                     scale={s}
                     fontSize={fontSize}
                     collapsed={isCollapsed}
-                    maxOutputLines={maxOutputLines}
+                    maxOutputLines={cell.commands?.output === "preview" ? Number.MAX_SAFE_INTEGER : maxOutputLines}
                   />
                 )}
               </div>
@@ -485,6 +564,35 @@ export const NotebookComposition: React.FC<NotebookProps> = ({
           })}
         </div>
       </div>
+
+      {previewCell ? (
+        <PreviewOverlay
+          visible={true}
+          startFrame={previewStartFrame}
+          endFrame={previewEndFrame}
+          exitDurationFrames={previewExitFrames}
+          scale={s}
+          title={previewCell.commands?.chapter || `cell-${previewCellIndex! + 1} output`}
+          subtitle={`cell-${previewCellIndex! + 1}`}
+        >
+          <div
+            style={{
+              paddingLeft: 12 * s,
+              borderLeft: `${3 * s}px solid ${monokai.borderActive}`,
+            }}
+          >
+            {previewCell.outputs.map((output, i) => (
+              <CellOutput
+                key={i}
+                output={output}
+                scale={s * 1.08}
+                fontSize={fontSize + 2}
+                maxOutputLines={Number.MAX_SAFE_INTEGER}
+              />
+            ))}
+          </div>
+        </PreviewOverlay>
+      ) : null}
 
       <div
         style={{
@@ -510,6 +618,6 @@ export const NotebookComposition: React.FC<NotebookProps> = ({
 };
 
 export function getNotebookDuration(timeline: Timeline, fps: number, animationMode: AnimationMode = "char"): number {
-  const { totalFrames } = buildFramePlan(timeline.events, fps, animationMode);
+  const { totalFrames } = buildFramePlan(timeline.cells, timeline.events, fps, animationMode);
   return totalFrames;
 }

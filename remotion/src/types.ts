@@ -1,16 +1,7 @@
-export type NotebookOutput =
-  | { kind: "stream"; text: string }
-  | { kind: "result"; text: string }
-  | { kind: "error"; text: string }
-  | {
-      kind: "image";
-      mimeType: string;
-      data: string;
-      width: number;
-      height: number;
-      alt: string;
-      preview: Array<Array<{ text: string; fg: string; bg: string }>> | null;
-    };
+import type { NtuiCommandMap } from "../../src/ntui-commands";
+import type { NotebookOutput as SharedNotebookOutput } from "../../src/types";
+
+export type NotebookOutput = SharedNotebookOutput;
 
 export type TimelineEvent =
   | { type: "clear"; ts: number }
@@ -23,7 +14,7 @@ export type TimelineEvent =
 export type CellKind = "code" | "markdown";
 
 export type Timeline = {
-  cells: { source: string; kind?: CellKind }[];
+  cells: { source: string; kind?: CellKind; commands?: NtuiCommandMap }[];
   events: TimelineEvent[];
 };
 
@@ -32,6 +23,7 @@ export type AnimationMode = "char" | "word" | "line" | "block" | "present";
 export type CellState = {
   source: string;
   kind: CellKind;
+  commands?: NtuiCommandMap;
   executionCount: number | null;
   outputs: NotebookOutput[];
   focused: boolean;

@@ -7,7 +7,7 @@
 import { isAbsolute, join } from "node:path";
 import { deserializeIpynb } from "./ipynb";
 import { executeNotebookCell } from "./notebook-execution";
-import { parseNtuiCommands, stripNtuiCommands } from "./ntui-commands";
+import { parseNtuiCommands, stripNtuiCommands, type NtuiCommandMap } from "./ntui-commands";
 import type { NotebookOutput } from "./types";
 import { PythonSession, resolvePython } from "./python-session";
 
@@ -20,7 +20,7 @@ export type TimelineEvent =
   | { type: "done"; ts: number };
 
 export type Timeline = {
-  cells: { source: string; kind?: "code" | "markdown" }[];
+  cells: { source: string; kind?: "code" | "markdown"; commands?: NtuiCommandMap }[];
   events: TimelineEvent[];
 };
 
@@ -111,7 +111,14 @@ export async function captureTimeline(opts: CaptureOptions): Promise<Timeline> {
   await session.stop();
 
   return {
-    cells: doc.cells.map((c) => ({ source: stripNtuiCommands(c.source), kind: c.kind })),
+    cells: doc.cells.map((c) => {
+      const parsed = parseNtuiCommands(c.source);
+      return {
+        source: stripNtuiCommands(c.source),
+        kind: c.kind,
+        commands: parsed.commands,
+      };
+    }),
     events,
   };
 }
