@@ -95,6 +95,7 @@ export type UIState = {
   themeName: ThemeName;
   helpOpen: boolean;
   outputDialogCellId: string | null;
+  runningCellId: string | null;
 };
 
 export type KernelStatus = "starting" | "idle" | "busy" | "error" | "stopped";

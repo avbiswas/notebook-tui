@@ -1,5 +1,5 @@
 import React, { useMemo } from "react";
-import { getDisplayLines } from "../../src/output-model";
+import { getDisplayLines, getStructuredResultLines } from "../../src/output-model";
 import {
   interpolate,
   spring,
@@ -128,7 +128,10 @@ const CellOutput: React.FC<{
       : output.kind === "result"
         ? monokai.success
         : monokai.text;
-  const lines = getDisplayLines(output.text);
+  const lines =
+    output.kind === "result"
+      ? (getStructuredResultLines(output.text, false) ?? getDisplayLines(output.text))
+      : getDisplayLines(output.text);
 
   return (
     <div
@@ -143,7 +146,23 @@ const CellOutput: React.FC<{
     >
       {lines.map((line, index) => (
         <div key={index} style={{ minHeight: 24 * s }}>
-          {line.length > 0 ? line : "\u00a0"}
+          {typeof line === "string"
+            ? (line.length > 0 ? line : "\u00a0")
+            : line.map((segment, segmentIndex) => (
+              <span
+                key={`${index}-${segmentIndex}`}
+                style={{
+                  color:
+                    segment.kind === "key"
+                      ? monokai.accent
+                      : segment.kind === "punctuation"
+                        ? monokai.muted
+                        : color,
+                }}
+              >
+                {segment.text.length > 0 ? segment.text : "\u00a0"}
+              </span>
+            ))}
         </div>
       ))}
     </div>

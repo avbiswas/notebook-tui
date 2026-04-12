@@ -1,5 +1,5 @@
 import React from "react";
-import { applyNotebookOutput } from "../../src/output-model";
+import { applyNotebookOutput, getDisplayLines, getStructuredResultLines } from "../../src/output-model";
 import {
   AbsoluteFill,
   interpolate,
@@ -120,8 +120,10 @@ function estimateCellHeight(
       if (o.kind === "image") {
         outputHeight += 200 * s;
       } else {
-        const text = "text" in o ? o.text : "";
-        const lines = text.split("\n").length;
+        const lines =
+          o.kind === "result"
+            ? (getStructuredResultLines(o.text, false)?.length ?? getDisplayLines(o.text).length)
+            : getDisplayLines(o.text).length;
         outputHeight += Math.max(outputLineHeight, lines * outputLineHeight);
       }
     }

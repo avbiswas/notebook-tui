@@ -58,7 +58,10 @@ import {
 } from "./notebook-state";
 import { deserializeIpynb, serializeIpynb } from "./ipynb";
 import { executeNotebookCell } from "./notebook-execution";
-import { getDisplayLines } from "./output-model";
+import {
+  getDisplayLines,
+  getStructuredResultLines,
+} from "./output-model";
 import { PythonSession, resolvePython } from "./python-session";
 import { themes } from "./theme";
 import type { AppState, NotebookCell, NotebookOutput } from "./types";
@@ -226,13 +229,19 @@ function renderTextOutput(
   keyPrefix: string,
   color: string,
   mutedColor: string,
+  keyColor: string,
   truncate = false,
   wrapWidth = 0,
 ) {
-  const rawLines = getDisplayLines(output.text);
-  const allLines = wrapWidth > 0
-    ? rawLines.flatMap((line) => wrapLine(line, wrapWidth))
-    : rawLines;
+  const structuredLines =
+    output.kind === "result" ? getStructuredResultLines(output.text, truncate) : null;
+  const allLines = structuredLines
+    ? structuredLines
+    : (
+      wrapWidth > 0
+        ? getDisplayLines(output.text).flatMap((line) => wrapLine(line, wrapWidth))
+        : getDisplayLines(output.text)
+    );
   const lines = truncate ? allLines.slice(0, OUTPUT_PREVIEW_MAX_LINES) : allLines;
   const hiddenCount = Math.max(0, allLines.length - lines.length);
 
@@ -240,7 +249,22 @@ function renderTextOutput(
     <>
       {lines.map((line, lineIndex) => (
         <text key={`${keyPrefix}-line-${lineIndex}`} fg={color}>
-          {line.length > 0 ? line : " "}
+          {typeof line === "string"
+            ? (line.length > 0 ? line : " ")
+            : line.map((segment, segmentIndex) => (
+              <span
+                key={`${keyPrefix}-line-${lineIndex}-segment-${segmentIndex}`}
+                fg={
+                  segment.kind === "key"
+                    ? keyColor
+                    : segment.kind === "punctuation"
+                      ? mutedColor
+                      : color
+                }
+              >
+                {segment.text.length > 0 ? segment.text : " "}
+              </span>
+            ))}
         </text>
       ))}
       {hiddenCount > 0 ? (
@@ -256,10 +280,15 @@ function estimateOutputRows(output: NotebookOutput, truncate = true, wrapWidth =
   if (output.kind === "image") {
     return output.preview?.length ? output.preview.length + 3 : 4;
   }
-  const rawLines = getDisplayLines(output.text);
-  const lines = wrapWidth > 0
-    ? rawLines.flatMap((line) => wrapLine(line, wrapWidth))
-    : rawLines;
+  const structuredLines =
+    output.kind === "result" ? getStructuredResultLines(output.text, truncate) : null;
+  const lines = structuredLines
+    ? structuredLines
+    : (
+      wrapWidth > 0
+        ? getDisplayLines(output.text).flatMap((line) => wrapLine(line, wrapWidth))
+        : getDisplayLines(output.text)
+    );
   const visibleLines = truncate ? Math.min(lines.length, OUTPUT_PREVIEW_MAX_LINES) : lines.length;
   return visibleLines + (lines.length > visibleLines ? 1 : 0);
 }
@@ -615,6 +644,18 @@ function App() {
   const theme = themes[state.ui.themeName];
   const notebookWidth = Math.min(120, Math.max(72, width - 6));
   const bodyHeight = Math.max(10, height - 4);
+  const [runningTick, setRunningTick] = useState(0);
+
+  useEffect(() => {
+    if (!state.ui.runningCellId) {
+      setRunningTick(0);
+      return;
+    }
+    const interval = setInterval(() => {
+      setRunningTick((tick) => tick + 1);
+    }, 120);
+    return () => clearInterval(interval);
+  }, [state.ui.runningCellId]);
 
   // Track the cursor row of the focused cell so the scroll effect re-runs on
   // pure cursor moves (h/j/k/l, w/b, etc.) which don't otherwise touch
@@ -857,6 +898,7 @@ function App() {
           ui: {
             ...current.ui,
             focusedCellId: cellId,
+            runningCellId: cellId,
             statusMessage: `Render: running cell ${i + 1}/${cells.length}...`,
           },
         }));
@@ -881,6 +923,7 @@ function App() {
                     ...next.ui,
                     focusedCellId: cellId,
                     focusTarget: "output",
+                    runningCellId: cellId,
                     statusMessage: "Output focused.",
                   },
                 };
@@ -895,6 +938,7 @@ function App() {
             kernel: { ...current.kernel, status: "idle", currentCellId: null, lastError: result.error },
             ui: {
               ...current.ui,
+              runningCellId: null,
               statusMessage: `Render: executed cell ${i + 1}/${cells.length}.`,
             },
           }));
@@ -902,7 +946,7 @@ function App() {
           setState((current) => ({
             ...current,
             kernel: { ...current.kernel, status: "error", currentCellId: null },
-            ui: { ...current.ui, statusMessage: `Render: error in cell ${i + 1}.` },
+            ui: { ...current.ui, runningCellId: null, statusMessage: `Render: error in cell ${i + 1}.` },
           }));
           break;
         }
@@ -913,7 +957,7 @@ function App() {
       // Final pause then quit
       setState((current) => ({
         ...current,
-        ui: { ...current.ui, statusMessage: "Render complete." },
+        ui: { ...current.ui, runningCellId: null, statusMessage: "Render complete." },
       }));
       await new Promise((r) => setTimeout(r, pause));
       renderer.destroy();
@@ -940,7 +984,12 @@ function App() {
     setState((current) => ({
       ...clearCellOutputs(current, focusedCell.id),
       kernel: { ...current.kernel, status: "busy", currentCellId: focusedCell.id, lastError: null },
-      ui: { ...current.ui, statusMessage: `Running ${focusedCell.id}...`, pendingOperator: null },
+      ui: {
+        ...current.ui,
+        runningCellId: focusedCell.id,
+        statusMessage: `Running ${focusedCell.id}...`,
+        pendingOperator: null,
+      },
     }));
 
     try {
@@ -955,6 +1004,7 @@ function App() {
                 ...next.ui,
                 focusedCellId: cellId,
                 focusTarget: "output",
+                runningCellId: cellId,
                 statusMessage: "Output focused.",
               },
             };
@@ -974,6 +1024,7 @@ function App() {
         },
         ui: {
           ...current.ui,
+          runningCellId: null,
           statusMessage: result.error
             ? `Execution failed in ${cellId}.`
             : `Executed ${cellId}.`,
@@ -991,6 +1042,7 @@ function App() {
         },
         ui: {
           ...current.ui,
+          runningCellId: null,
           statusMessage:
             error instanceof Error ? error.message : "Execution bridge failed unexpectedly.",
           pendingOperator: null,
@@ -1030,6 +1082,7 @@ function App() {
         ui: {
           ...current.ui,
           focusedCellId: cellId,
+          runningCellId: cellId,
           statusMessage: `Running ${cellId}...`,
           pendingOperator: null,
           pendingMotion: null,
@@ -1047,6 +1100,7 @@ function App() {
                   ...next.ui,
                   focusedCellId: cellId,
                   focusTarget: "output",
+                  runningCellId: cellId,
                   statusMessage: "Output focused.",
                 },
               };
@@ -1066,6 +1120,7 @@ function App() {
           },
           ui: {
             ...current.ui,
+            runningCellId: cellId,
             statusMessage: `Executed ${cellId}.`,
             pendingOperator: null,
             pendingMotion: null,
@@ -1083,6 +1138,7 @@ function App() {
           },
           ui: {
             ...current.ui,
+            runningCellId: null,
             statusMessage:
               error instanceof Error ? error.message : `Execution failed in ${cellId}.`,
             pendingOperator: null,
@@ -1101,6 +1157,7 @@ function App() {
       ui: {
         ...current.ui,
         mode: "normal",
+        runningCellId: null,
         commandBuffer: "",
         statusMessage: "Executed all cells.",
       },
@@ -1114,16 +1171,19 @@ function App() {
       next.notebook.future = [];
       next.notebook.present = {
         ...current.notebook.present,
+        executionCounter: 0,
         cells: current.notebook.present.cells.map((cell) => ({
           ...cell,
           outputs: [],
+          executionCount: null,
         })),
       };
       next.ui = {
         ...current.ui,
         mode: "normal",
+        runningCellId: null,
         commandBuffer: "",
-        statusMessage: "Cleared all outputs.",
+        statusMessage: "Cleared outputs and execution counts.",
       };
       return next;
     });
@@ -2020,6 +2080,9 @@ function App() {
           >
             {state.notebook.present.cells.map((cell) => {
               const active = cell.id === state.ui.focusedCellId;
+              const isRunningCell = state.ui.runningCellId === cell.id;
+              const spinnerFrames = ["-", "\\", "|", "/"];
+              const spinner = spinnerFrames[runningTick % spinnerFrames.length] ?? "-";
               const editorLines = renderEditorLines(cell, state);
               const cursor = state.ui.cursorByCellId[cell.id] ?? defaultCursorForCell(cell);
               const cellIndex = getCellIndex(state, cell.id);
@@ -2073,7 +2136,13 @@ function App() {
                   flexDirection="column"
                   border
                   borderStyle="rounded"
-                  borderColor={active ? theme.borderActive : theme.border}
+                  borderColor={
+                    isRunningCell
+                      ? theme.warning
+                      : active
+                        ? theme.borderActive
+                        : theme.border
+                  }
                   backgroundColor={
                     state.ui.mode === "cell_visual" &&
                     state.ui.selectionAnchorCellId &&
@@ -2085,6 +2154,8 @@ function App() {
                       return cellIndex >= start && cellIndex <= end;
                     })()
                       ? theme.selectionCell
+                      : isRunningCell
+                        ? "#312413"
                       : active
                         ? theme.panelAlt
                         : theme.panel
@@ -2097,10 +2168,17 @@ function App() {
                   }}
                 >
                   <box flexDirection="row" justifyContent="space-between">
-                    <text fg={active ? theme.accent : theme.muted}>
-                      {cell.kind === "markdown" ? "md" : `In [${cell.executionCount ?? " "}]:`}
+                    <text fg={isRunningCell ? theme.warning : active ? theme.accent : theme.muted}>
+                      {cell.kind === "markdown"
+                        ? "md"
+                        : `In [${isRunningCell ? spinner : (cell.executionCount ?? " ")}]:`}
                     </text>
                     <box flexDirection="row" gap={1}>
+                      {isRunningCell ? (
+                        <text fg="#000000" bg={theme.warning}>
+                          {" running "}
+                        </text>
+                      ) : null}
                       {active && state.ui.mode === "insert" ? (
                         <text fg="#000000" bg={theme.borderActive}>
                           {" editing "}
@@ -2229,6 +2307,7 @@ function App() {
                                   ? theme.success
                                   : theme.text,
                               theme.muted,
+                              theme.accent,
                               true,
                               notebookWidth - 4,
                             )}
@@ -2368,6 +2447,7 @@ function App() {
                             ? theme.success
                             : theme.text,
                         theme.muted,
+                        theme.accent,
                         false,
                         Math.min(notebookWidth + 8, Math.max(70, width - 6)) - 8,
                       )}

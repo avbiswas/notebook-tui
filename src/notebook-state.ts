@@ -140,6 +140,7 @@ export function createAppStateFromDocument(
       themeName: "monokai",
       helpOpen: false,
       outputDialogCellId: null,
+      runningCellId: null,
     },
     kernel: {
       status: "starting",
@@ -1363,7 +1364,7 @@ export function moveFocusToBoundary(state: AppState, edge: "start" | "end"): App
 export function clearCellOutputs(state: AppState, cellId: string): AppState {
   return applyNotebookMutation(state, (document) => {
     document.cells = document.cells.map((cell) =>
-      cell.id === cellId ? { ...cell, outputs: [], executionCount: cell.executionCount } : cell,
+      cell.id === cellId ? { ...cell, outputs: [], executionCount: null } : cell,
     );
   });
 }
