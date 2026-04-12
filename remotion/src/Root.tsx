@@ -51,7 +51,13 @@ export const RemotionRoot: React.FC = () => {
       fps={FPS}
       width={WIDTH}
       height={HEIGHT}
-      defaultProps={{ timeline: defaultTimeline, animationMode: "char", fontSize: 16 } satisfies NotebookProps}
+      defaultProps={{
+        timeline: defaultTimeline,
+        animationMode: "char",
+        fontSize: 16,
+        maxOutputLines: 10,
+        collapseCodeCellsOver: 5,
+      } satisfies NotebookProps}
       calculateMetadata={calculateMetadata}
     />
   );

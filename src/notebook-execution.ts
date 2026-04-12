@@ -4,6 +4,7 @@ import {
   reduceNotebookCellRuntime,
   type NotebookCellEvent,
 } from "./output-model";
+import { stripNtuiCommands } from "./ntui-commands";
 import type { PythonSession } from "./python-session";
 import type { NotebookOutput } from "./types";
 
@@ -19,7 +20,7 @@ export async function executeNotebookCell(
   onEvent?: (event: NotebookCellEvent) => void,
 ): Promise<ExecutedNotebookCell> {
   let runtime = createNotebookCellRuntime();
-  const result = await session.execute(source, (output) => {
+  const result = await session.execute(stripNtuiCommands(source), (output) => {
     const event: NotebookCellEvent = { type: "output", output };
     runtime = reduceNotebookCellRuntime(runtime, event);
     onEvent?.(event);

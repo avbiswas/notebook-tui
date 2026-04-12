@@ -1,9 +1,12 @@
 import React from "react";
-import { applyNotebookOutput, getDisplayLines, getStructuredResultLines } from "../../src/output-model";
+import {
+  applyNotebookOutput,
+  getDisplayLines,
+  getStructuredResultLines,
+  type FormattedOutputLine,
+} from "../../src/output-model";
 import {
   AbsoluteFill,
-  interpolate,
-  spring,
   useCurrentFrame,
   useVideoConfig,
 } from "remotion";
@@ -16,6 +19,8 @@ export type NotebookProps = {
   timeline: Timeline;
   animationMode?: AnimationMode;
   fontSize?: number;
+  maxOutputLines?: number;
+  collapseCodeCellsOver?: number;
 };
 
 const SCROLL_SETTLE_SECONDS = 0.5;
@@ -96,43 +101,179 @@ function collapsedCellHeight(s: number, fontSize: number): number {
   return lineHeight + (16 + 4 + 10) * s;
 }
 
-function estimateCellHeight(
-  cell: CellState, hasOutput: boolean, collapsed: boolean, s: number, fontSize: number,
+function maxCharsPerLine(widthPx: number, fontSizePx: number): number {
+  const monospaceCharWidth = fontSizePx * 0.62;
+  return Math.max(8, Math.floor(widthPx / Math.max(1, monospaceCharWidth)));
+}
+
+function countWrappedLines(text: string, maxChars: number): number {
+  const lines = text.split("\n");
+  let total = 0;
+
+  for (const line of lines) {
+    if (line.length === 0) {
+      total += 1;
+      continue;
+    }
+    total += Math.max(1, Math.ceil(line.length / maxChars));
+  }
+
+  return total;
+}
+
+function wrapPlainLines(text: string, maxChars: number): string[] {
+  const rawLines = text.split("\n");
+  const wrapped: string[] = [];
+
+  for (const line of rawLines) {
+    if (line.length === 0) {
+      wrapped.push("");
+      continue;
+    }
+
+    let remaining = line;
+    while (remaining.length > 0) {
+      wrapped.push(remaining.slice(0, maxChars));
+      remaining = remaining.slice(maxChars);
+    }
+  }
+
+  return wrapped;
+}
+
+function getWrappedOutputLines(
+  output: CellState["outputs"][number],
+  maxChars: number,
+): Array<string | FormattedOutputLine> {
+  if (output.kind === "image") {
+    return [];
+  }
+
+  if (output.kind === "result") {
+    const structured = getStructuredResultLines(output.text, false);
+    if (structured) {
+      return structured.map((segments) => segments.map((segment) => segment.text).join(""));
+    }
+  }
+
+  return wrapPlainLines(getDisplayLines(output.text).join("\n"), maxChars);
+}
+
+function visibleSourceLineCount(
+  source: string,
+  animationMode: AnimationMode,
+  fps: number,
+  frame: number,
+  typeStart: number,
 ): number {
-  if (collapsed) return collapsedCellHeight(s, fontSize);
+  const lines = source.split("\n");
+
+  if (animationMode === "present" || animationMode === "block") {
+    return frame >= typeStart ? lines.length : 1;
+  }
+  if (animationMode === "line") {
+    const linesPerSecond = 6.67;
+    const framesElapsed = Math.max(0, frame - typeStart);
+    return Math.min(lines.length, Math.floor((framesElapsed / fps) * linesPerSecond) + 1);
+  }
+  if (animationMode === "word") {
+    const wordsPerSecond = 8;
+    const framesElapsed = Math.max(0, frame - typeStart);
+    const revealedWordCount = Math.floor((framesElapsed / fps) * wordsPerSecond);
+    const words = source.match(/\S+/g) || [];
+    const totalWords = words.length;
+    if (revealedWordCount >= totalWords) {
+      return lines.length;
+    }
+    let revealedChars = 0;
+    const wordMatches = [...source.matchAll(/\S+/g)];
+    if (revealedWordCount > 0 && wordMatches[revealedWordCount - 1]) {
+      const lastWord = wordMatches[revealedWordCount - 1]!;
+      revealedChars = lastWord.index! + lastWord[0].length;
+    }
+    return lines.filter(
+      (_, i) => i === 0 || revealedChars > lines.slice(0, i).join("\n").length + 1,
+    ).length;
+  }
+
+  const schedule = buildTypingSchedule(source, fps);
+  const framesElapsed = Math.max(0, frame - typeStart);
+  let lo = 0;
+  let hi = schedule.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (schedule[mid]! <= framesElapsed) lo = mid + 1;
+    else hi = mid;
+  }
+  const revealedChars = Math.min(source.length, lo);
+  return lines.filter(
+    (_, i) => i === 0 || revealedChars > lines.slice(0, i).join("\n").length + 1,
+  ).length;
+}
+
+function estimateOutputHeight(
+  outputs: CellState["outputs"],
+  s: number,
+  fontSize: number,
+  contentWidth: number,
+  maxOutputLines: number,
+): number {
+  if (outputs.length === 0) {
+    return 0;
+  }
+
+  const outputLineHeight = Math.round(fontSize * 1.5) * s;
+  const outputChars = maxCharsPerLine(contentWidth, fontSize * s);
+  let outputHeight = 0;
+
+  for (const o of outputs) {
+    if (o.kind === "image") {
+      outputHeight += 200 * s;
+      continue;
+    }
+    const wrapped = getWrappedOutputLines(o, outputChars);
+    const visibleWrapped = Math.min(wrapped.length, maxOutputLines);
+    outputHeight += Math.max(outputLineHeight, visibleWrapped * outputLineHeight);
+    if (wrapped.length > visibleWrapped) {
+      outputHeight += outputLineHeight;
+    }
+  }
+
+  outputHeight += Math.round((fontSize - 4) * 1.4) * s + (4 + 8) * s;
+  return outputHeight;
+}
+
+function estimateCellHeight(
+  cell: CellState,
+  collapsed: boolean,
+  s: number,
+  fontSize: number,
+  sourceWrappedLines: number,
+  outputHeight: number,
+): number {
+  if (collapsed) {
+    return collapsedCellHeight(s, fontSize) + outputHeight;
+  }
 
   const sourceLineHeight = Math.round(fontSize * 1.625) * s;
-  const outputLineHeight = Math.round(fontSize * 1.5) * s;
 
   if (cell.kind === "markdown") {
-    const lines = cell.source.split("\n").length;
-    return lines * sourceLineHeight + 24 * s;
+    return sourceWrappedLines * sourceLineHeight + 24 * s;
   }
 
   const headerHeight = Math.round((fontSize - 1) * 1.4) * s + 8 * s;
   const padding = (24 + 4 + 10) * s;
-  const sourceLines = cell.source.split("\n").length;
-  const sourceHeight = sourceLines * sourceLineHeight;
-
-  let outputHeight = 0;
-  if (hasOutput) {
-    for (const o of cell.outputs) {
-      if (o.kind === "image") {
-        outputHeight += 200 * s;
-      } else {
-        const lines =
-          o.kind === "result"
-            ? (getStructuredResultLines(o.text, false)?.length ?? getDisplayLines(o.text).length)
-            : getDisplayLines(o.text).length;
-        outputHeight += Math.max(outputLineHeight, lines * outputLineHeight);
-      }
-    }
-    outputHeight += Math.round((fontSize - 4) * 1.4) * s + (4 + 8) * s;
-  }
+  const sourceHeight = sourceWrappedLines * sourceLineHeight;
   return headerHeight + sourceHeight + outputHeight + padding;
 }
 
-export const NotebookComposition: React.FC<NotebookProps> = ({ timeline, animationMode = "char", fontSize = 16 }) => {
+export const NotebookComposition: React.FC<NotebookProps> = ({
+  timeline,
+  animationMode = "char",
+  fontSize = 16,
+  maxOutputLines = 10,
+  collapseCodeCellsOver = 5,
+}) => {
   const frame = useCurrentFrame();
   const { fps, width, height } = useVideoConfig();
 
@@ -199,60 +340,65 @@ export const NotebookComposition: React.FC<NotebookProps> = ({ timeline, animati
   const collapsedCells: boolean[] = new Array(timeline.cells.length).fill(false);
   if (currentFocus >= 0) {
     for (let i = 0; i < currentFocus; i++) {
-      if (focusFrames[i]! >= 0 && cellStates[i]!.source.split("\n").length > 5) collapsedCells[i] = true;
+      if (focusFrames[i]! >= 0 && cellStates[i]!.source.split("\n").length > collapseCodeCellsOver) collapsedCells[i] = true;
     }
   }
 
-  // --- Lazy scrolling ---
-  // Only scroll when the focused cell's bottom would overflow the viewport.
-  // When it does, snap the cell's top to the top of the viewport.
   const viewportHeight = height - 40 * s;
+  const notebookWidth = Math.round(width * (height > width ? 0.9 : 0.625));
+  const sourceWidth = Math.max(120, notebookWidth - (16 * 2 + 24 + 12) * s);
+  const outputWidth = Math.max(120, notebookWidth - (16 * 2 + 12 + 12) * s);
+  const sourceChars = maxCharsPerLine(sourceWidth, (fontSize + 1) * s);
+
+  const cellHeights = cellStates.map((cell, i) => {
+    const isCurrent = i === currentFocus;
+    const hasFocused = focusFrames[i]! >= 0;
+    const typeStart = typingFrames[i] ?? focusFrames[i] ?? 0;
+    const visibleLines =
+      cell.kind === "markdown"
+        ? countWrappedLines(cell.source || "*empty*", sourceChars)
+        : !hasFocused
+          ? 1
+          : countWrappedLines(
+            cell.source.split("\n").slice(0, visibleSourceLineCount(cell.source, animationMode, fps, frame, typeStart)).join("\n"),
+            sourceChars,
+          );
+    const outputHeight =
+      (outputFrames[i] !== null && frame >= outputFrames[i]!) || cell.outputs.length > 0
+        ? estimateOutputHeight(cell.outputs, s, fontSize, outputWidth, maxOutputLines)
+        : 0;
+
+    return estimateCellHeight(
+      cell,
+      collapsedCells[i]!,
+      s,
+      fontSize,
+      collapsedCells[i]! && !isCurrent ? 1 : visibleLines,
+      outputHeight,
+    );
+  });
 
   const getCellTop = (cellIndex: number) => {
     let y = 0;
     for (let i = 0; i < cellIndex; i++) {
-      const hasOutput = outputFrames[i] !== null && frame >= outputFrames[i]!;
-      y += estimateCellHeight(cellStates[i]!, hasOutput, collapsedCells[i]!, s, fontSize);
+      y += cellHeights[i]!;
     }
     return y;
   };
 
-  // Replay all focus events to compute the lazy scroll position at each step.
-  // This way each scroll decision is based on the accumulated scroll state.
-  let lazyScroll = 0;
-  let lazyScrollPrev = 0;
-  let lastFocusFrame = 0;
-  {
-    const focusEvents = frameEvents.filter((fe) => fe.event.type === "focus" && fe.frame <= frame);
-    for (const fe of focusEvents) {
-      const focusEvt = fe.event as { type: "focus"; cellIndex: number };
-      lazyScrollPrev = lazyScroll;
-      lastFocusFrame = fe.frame;
-
-      const cellTop = getCellTop(focusEvt.cellIndex);
-      const hasOut = outputFrames[focusEvt.cellIndex] !== null && frame >= outputFrames[focusEvt.cellIndex]!;
-      const cellBottom = cellTop + estimateCellHeight(cellStates[focusEvt.cellIndex]!, hasOut, false, s, fontSize);
-
-      if (cellBottom > lazyScroll + viewportHeight) {
-        // Cell overflows bottom — put cell top at 25% from viewport top
-        lazyScroll = Math.max(0, cellTop - viewportHeight * 0.25);
-      } else if (cellTop < lazyScroll) {
-        // Cell is above viewport — bring it into view at 25%
-        lazyScroll = Math.max(0, cellTop - viewportHeight * 0.25);
-      }
-    }
-  }
-
   let scrollY = 0;
   if (currentFocus >= 0) {
-    const scrollProgress = spring({
-      frame,
-      fps,
-      delay: lastFocusFrame,
-      config: { damping: 200 },
-    });
+    const cellTop = getCellTop(currentFocus);
+    const cellBottom = cellTop + cellHeights[currentFocus]!;
+    const topMargin = viewportHeight * 0.15;
+    const bottomMargin = viewportHeight * 0.18;
 
-    scrollY = interpolate(scrollProgress, [0, 1], [lazyScrollPrev, lazyScroll]);
+    if (cellBottom > viewportHeight - bottomMargin) {
+      scrollY = Math.max(0, cellBottom - (viewportHeight - bottomMargin));
+    }
+    if (cellTop < scrollY + topMargin) {
+      scrollY = Math.max(0, cellTop - topMargin);
+    }
   }
 
   // Status bar
@@ -293,7 +439,7 @@ export const NotebookComposition: React.FC<NotebookProps> = ({ timeline, animati
       >
         <div
           style={{
-            width: Math.round(width * (height > width ? 0.9 : 0.625)),
+            width: notebookWidth,
             paddingTop: Math.round(24 * s),
             paddingBottom: Math.round(24 * s),
             transform: `translateY(${-scrollY}px)`,
@@ -331,6 +477,7 @@ export const NotebookComposition: React.FC<NotebookProps> = ({ timeline, animati
                     scale={s}
                     fontSize={fontSize}
                     collapsed={isCollapsed}
+                    maxOutputLines={maxOutputLines}
                   />
                 )}
               </div>

@@ -7,6 +7,7 @@ import {
 } from "@opentui/core";
 import { createRoot, useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
 import { basename, isAbsolute, join } from "node:path";
+import { tokenizeSource } from "../remotion/src/SyntaxLine";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   appendCellOutput,
@@ -87,9 +88,14 @@ const HELP_LINES = [
   ":clear: clear outputs",
   "",
   "Outputs",
-  "Down on the last source line: focus the output panel",
-  "Enter on output panel: expand full output view",
-  "Up: return from output panel to the editor",
+  "Shift+E: expand the focused cell output",
+  "Outputs no longer take focus during navigation",
+  "",
+  "ntui Commands",
+  "Leading `# ntui:` lines define presentation commands and are hidden while rendering",
+  "Syntax: # ntui: key=value key2=value2",
+  "Example: # ntui: output=preview input=fade",
+  "Normal Python comments still render as-is",
   "",
   "Commands",
   ":w / :q / :wq: save / quit / save and quit",
@@ -154,9 +160,9 @@ function truncateText(value: string, maxWidth: number) {
   return `${value.slice(0, maxWidth - 1)}…`;
 }
 
-function renderEditorLines(cell: NotebookCell, state: AppState) {
+function renderEditorLines(source: string, cell: NotebookCell, state: AppState) {
   const cursor = state.ui.cursorByCellId[cell.id] ?? defaultCursorForCell(cell);
-  const lines = getLines(cell.source);
+  const lines = getLines(source);
 
   return lines.map((line, index) => {
     const isCursorLine = index === cursor.row;
@@ -332,17 +338,6 @@ function getNotebookBlocks(state: AppState, wrapWidth = 0): NotebookBlock[] {
     });
     top += editorHeight;
 
-    if (cell.kind === "code" && cell.outputs.length > 0) {
-      const outputHeight = estimateOutputBlockRows(cell, wrapWidth);
-      blocks.push({
-        cellId: cell.id,
-        focusTarget: "output",
-        top,
-        height: outputHeight,
-      });
-      top += outputHeight;
-    }
-
     top += gapRows;
   }
 
@@ -395,7 +390,14 @@ function getScrollTargetId(state: AppState): string | null {
   if (!focusedCell) {
     return null;
   }
-  if (state.ui.focusTarget === "output" && focusedCell.outputs.length > 0) {
+  if (
+    focusedCell.kind === "code" &&
+    focusedCell.outputs.length > 0 &&
+    (
+      state.ui.runningCellId === focusedCell.id ||
+      focusedCell.outputs.some((output) => output.kind === "error")
+    )
+  ) {
     return `output-${focusedCell.id}`;
   }
   // Markdown cells in display modes have no per-row cursor, scroll the whole
@@ -497,14 +499,32 @@ function moveFocusByBlock(state: AppState, delta: number, wrapWidth = 0): AppSta
       focusTarget: nextBlock.focusTarget,
       pendingOperator: null,
       pendingMotion: null,
-      statusMessage:
-        nextBlock.focusTarget === "output" ? "Output focused." : "Block focused.",
+      statusMessage: "Block focused.",
+    },
+  };
+}
+
+function expandFocusedCellOutput(state: AppState): AppState {
+  const focusedCell = getFocusedCell(state);
+  if (!focusedCell || focusedCell.outputs.length === 0) {
+    return withStatus(state, "Focused cell has no output.");
+  }
+
+  return {
+    ...state,
+    ui: {
+      ...state.ui,
+      outputDialogCellId: focusedCell.id,
+      pendingOperator: null,
+      pendingMotion: null,
+      statusMessage: "Expanded output view.",
     },
   };
 }
 
 function renderActiveLine(
   line: string,
+  lineTokens: Array<{ text: string; color: string }> | undefined,
   isActive: boolean,
   isCursorLine: boolean,
   cursorCol: number,
@@ -520,24 +540,51 @@ function renderActiveLine(
   lineStartOffset: number,
 ) {
   const text = line.length === 0 ? " " : line;
+  const chars: Array<{ text: string; fg: string }> = [];
+
+  if (lineTokens && line.length > 0) {
+    for (const token of lineTokens) {
+      for (const ch of token.text) {
+        chars.push({ text: ch, fg: token.color });
+      }
+    }
+  }
+  while (chars.length < line.length) {
+    chars.push({ text: line[chars.length] ?? " ", fg: theme.text });
+  }
+  if (chars.length === 0) {
+    chars.push({ text: " ", fg: theme.text });
+  }
 
   if (!selection) {
     if (!isActive || !isCursorLine) {
-      return <text fg={theme.text}>{text}</text>;
+      return (
+        <text fg={theme.text}>
+          {chars.map((char, index) => (
+            <span key={`plain-${index}`} fg={char.fg}>
+              {char.text}
+            </span>
+          ))}
+        </text>
+      );
     }
 
     const cursorIndex = Math.min(cursorCol, line.length);
-    const before = line.slice(0, cursorIndex);
-    const currentChar = line[cursorIndex] ?? " ";
-    const after = line.slice(line[cursorIndex] ? cursorIndex + 1 : cursorIndex);
 
     if (mode === "insert") {
       return (
         <text fg={theme.text}>
-          {before}
+          {chars.slice(0, cursorIndex).map((char, index) => (
+            <span key={`before-${index}`} fg={char.fg}>
+              {char.text}
+            </span>
+          ))}
           <span fg={theme.borderActive}>|</span>
-          {currentChar}
-          {after.length === 0 ? "" : after}
+          {chars.slice(cursorIndex).map((char, index) => (
+            <span key={`after-${index}`} fg={char.fg}>
+              {char.text}
+            </span>
+          ))}
         </text>
       );
     }
@@ -546,78 +593,62 @@ function renderActiveLine(
 
     return (
       <text fg={theme.text}>
-        {before}
-        <span fg="#000000" bg={cursorBg}>
-          {currentChar}
-        </span>
-        {after.length === 0 ? "" : after}
+        {chars.map((char, index) =>
+          index === cursorIndex ? (
+            <span key={`cursor-${index}`} fg="#000000" bg={cursorBg}>
+              {char.text}
+            </span>
+          ) : (
+            <span key={`char-${index}`} fg={char.fg}>
+              {char.text}
+            </span>
+          ),
+        )}
+        {cursorIndex >= line.length ? (
+          <span key="cursor-eol" fg="#000000" bg={cursorBg}>
+            {" "}
+          </span>
+        ) : null}
       </text>
     );
   }
 
-  const spans: Array<{ text: string; selected: boolean; cursor: boolean }> = [];
-  let currentText = "";
-  let currentSelected = false;
+  const spans: Array<{ text: string; fg: string; bg?: string }> = [];
+  const cursorIndex = Math.min(cursorCol, line.length);
 
-  for (let index = 0; index < text.length; index += 1) {
+  for (let index = 0; index < chars.length; index += 1) {
+    const char = chars[index]!;
     const absoluteOffset = lineStartOffset + index;
     const selected =
       absoluteOffset >= selection.start && absoluteOffset < selection.end;
-    const cursor = isActive && isCursorLine && index === Math.min(cursorCol, line.length);
+    const cursor = isActive && isCursorLine && index === cursorIndex;
 
-    if (currentText.length === 0) {
-      currentText = text[index] ?? " ";
-      currentSelected = selected;
-      if (cursor) {
-        spans.push({ text: currentText, selected: currentSelected, cursor: true });
-        currentText = "";
-      }
-      continue;
-    }
-
-    if (selected === currentSelected && !cursor) {
-      currentText += text[index] ?? " ";
-      continue;
-    }
-
-    spans.push({ text: currentText, selected: currentSelected, cursor: false });
-    currentText = text[index] ?? " ";
-    currentSelected = selected;
-    if (cursor) {
-      spans.push({ text: currentText, selected: currentSelected, cursor: true });
-      currentText = "";
-    }
-  }
-
-  if (currentText.length > 0) {
-    spans.push({ text: currentText, selected: currentSelected, cursor: false });
+    spans.push({
+      text: char.text,
+      fg: cursor
+        ? "#000000"
+        : selected
+          ? theme.selectionText
+          : char.fg,
+      bg: cursor
+        ? (selected ? theme.selection : theme.borderActive)
+        : selected
+          ? theme.selection
+          : undefined,
+    });
   }
 
   if (isActive && isCursorLine && cursorCol >= line.length) {
-    spans.push({ text: " ", selected: false, cursor: true });
+    spans.push({ text: " ", fg: "#000000", bg: theme.borderActive });
   }
 
   return (
     <text fg={theme.text}>
-      {spans.map((span, index) =>
-        span.cursor ? (
-          <span
-            key={`cursor-${index}`}
-            fg="#000000"
-            bg={span.selected ? theme.selection : theme.borderActive}
-          >
-            {span.text}
-          </span>
-        ) : span.selected ? (
-          <span key={`sel-${index}`} fg={theme.selectionText} bg={theme.selection}>
-            {span.text}
-          </span>
-        ) : (
-          <span key={`txt-${index}`} fg={theme.text}>
-            {span.text}
-          </span>
-        ),
-      )}
+      {spans.map((span, index) => (
+        <span key={`span-${index}`} fg={span.fg} bg={span.bg}>
+          {span.text}
+        </span>
+      ))}
     </text>
   );
 }
@@ -688,8 +719,7 @@ function App() {
           focusTarget,
           pendingOperator: null,
           pendingMotion: null,
-          statusMessage:
-            focusTarget === "output" ? "Output focused." : "Cell focused.",
+          statusMessage: "Cell focused.",
         },
       };
     });
@@ -922,9 +952,8 @@ function App() {
                   ui: {
                     ...next.ui,
                     focusedCellId: cellId,
-                    focusTarget: "output",
                     runningCellId: cellId,
-                    statusMessage: "Output focused.",
+                    statusMessage: "Streaming output...",
                   },
                 };
               });
@@ -1003,9 +1032,8 @@ function App() {
               ui: {
                 ...next.ui,
                 focusedCellId: cellId,
-                focusTarget: "output",
                 runningCellId: cellId,
-                statusMessage: "Output focused.",
+                statusMessage: "Streaming output...",
               },
             };
           });
@@ -1099,9 +1127,8 @@ function App() {
                 ui: {
                   ...next.ui,
                   focusedCellId: cellId,
-                  focusTarget: "output",
                   runningCellId: cellId,
-                  statusMessage: "Output focused.",
+                  statusMessage: "Streaming output...",
                 },
               };
             });
@@ -1291,52 +1318,6 @@ function App() {
         return redoNotebook(current);
       }
 
-      if (current.ui.focusTarget === "output") {
-        switch (key.name) {
-          case "escape":
-            return withStatus(
-              {
-                ...current,
-                ui: { ...current.ui, focusTarget: "editor" },
-              },
-              "Returned to editor.",
-            );
-          case "i":
-            // Transfer focus back to the code cell attached to this output
-            // and drop straight into insert mode — the output box itself is
-            // read-only so staying focused there would be a dead end.
-            return {
-              ...current,
-              ui: {
-                ...current.ui,
-                focusTarget: "editor",
-                mode: "insert",
-                pendingOperator: null,
-                pendingMotion: null,
-                statusMessage: "Insert mode.",
-              },
-            };
-          case "down":
-          case "j":
-            return moveFocusByBlock(current, 1);
-          case "up":
-          case "k":
-            return moveFocusByBlock(current, -1);
-          case "return":
-          case "enter":
-            return {
-              ...current,
-              ui: {
-                ...current.ui,
-                outputDialogCellId: current.ui.focusedCellId,
-                statusMessage: "Expanded output view.",
-              },
-            };
-          default:
-            return current;
-        }
-      }
-
       switch (key.name) {
         case "space":
           return {
@@ -1499,7 +1480,7 @@ function App() {
           if (current.ui.pendingMotion === "leader") {
             return moveFocusToRelativeCell(current, -1);
           }
-          return moveFocusByBlock(current, -1);
+          return moveCursor(current, -1, 0);
         case "down":
         case "j":
           if (current.ui.pendingMotion === "leader") {
@@ -1508,7 +1489,12 @@ function App() {
           if (key.shift) {
             return joinLineBelow(current);
           }
-          return moveFocusByBlock(current, 1);
+          return moveCursor(current, 1, 0);
+        case "e":
+          if (key.shift) {
+            return expandFocusedCellOutput(current);
+          }
+          return moveCursorByWord(current, "end");
         case "0":
           return moveCursorToLineBoundary(current, "start");
         case "home":
@@ -1619,8 +1605,6 @@ function App() {
             return yankWordForward(current);
           }
           return moveCursorByWord(current, "forward");
-        case "e":
-          return moveCursorByWord(current, "end");
         case "d":
           if (current.ui.pendingMotion === "leader") {
             return deleteFocusedCellAndRestorePrevious(current);
@@ -2083,7 +2067,8 @@ function App() {
               const isRunningCell = state.ui.runningCellId === cell.id;
               const spinnerFrames = ["-", "\\", "|", "/"];
               const spinner = spinnerFrames[runningTick % spinnerFrames.length] ?? "-";
-              const editorLines = renderEditorLines(cell, state);
+              const editorLines = renderEditorLines(cell.source, cell, state);
+              const tokenizedSource = tokenizeSource(cell.source);
               const cursor = state.ui.cursorByCellId[cell.id] ?? defaultCursorForCell(cell);
               const cellIndex = getCellIndex(state, cell.id);
               const textSelection =
@@ -2119,12 +2104,21 @@ function App() {
                         </text>
                       </box>
                     ) : null}
-                    <markdown
-                      content={cell.source || "*empty*"}
-                      syntaxStyle={syntaxStyle}
-                      fg={theme.text}
-                      bg="#000000"
-                    />
+                    <box id={active ? "cursor-line" : undefined} flexDirection="row" marginTop={active ? 1 : 0}>
+                      {active ? (
+                        <box width={2}>
+                          <text fg={theme.borderActive}>▌</text>
+                        </box>
+                      ) : null}
+                      <box flexGrow={1}>
+                        <markdown
+                          content={cell.source || "*empty*"}
+                          syntaxStyle={syntaxStyle}
+                          fg={theme.text}
+                          bg="#000000"
+                        />
+                      </box>
+                    </box>
                   </box>
                 );
               }
@@ -2232,6 +2226,7 @@ function App() {
                             >
                               {renderActiveLine(
                                 line.text,
+                                tokenizedSource[line.lineNumber - 1],
                                 active,
                                 line.isCursorLine,
                                 cursor.col,
@@ -2259,33 +2254,23 @@ function App() {
                       paddingY={1}
                       border
                       borderStyle="rounded"
-                      borderColor={
-                        active && state.ui.focusTarget === "output"
-                          ? theme.borderActive
-                          : theme.border
-                      }
-                      backgroundColor={
-                        active && state.ui.focusTarget === "output"
-                          ? theme.panelAlt
-                          : theme.background
-                      }
+                      borderColor={active ? theme.borderActive : theme.border}
+                      backgroundColor={active ? theme.panelAlt : theme.background}
                       onMouseDown={(event: {
                         button: number;
                         stopPropagation: () => void;
                       }) => {
                         if (event.button !== 0) return;
                         event.stopPropagation();
-                        activateCell(cell.id, "output");
+                        activateCell(cell.id, "editor");
                       }}
                     >
                       <box flexDirection="row" justifyContent="space-between">
                         <text fg={theme.muted}>
                           {`Out: ${cell.outputs.map((output) => output.kind).join(", ")}`}
                         </text>
-                        <text fg={active && state.ui.focusTarget === "output" ? theme.accent : theme.muted}>
-                          {active && state.ui.focusTarget === "output"
-                            ? "Enter expands"
-                            : "Down focuses"}
+                        <text fg={active ? theme.accent : theme.muted}>
+                          {"Shift+E expands"}
                         </text>
                       </box>
                       {cell.outputs.map((output, index) =>

@@ -1,5 +1,5 @@
 import React, { useMemo } from "react";
-import { getDisplayLines, getStructuredResultLines } from "../../src/output-model";
+import { getDisplayLines, getStructuredResultLines, type FormattedOutputLine } from "../../src/output-model";
 import {
   interpolate,
   spring,
@@ -61,7 +61,9 @@ const CellOutput: React.FC<{
   output: CellState["outputs"][number];
   scale: number;
   fontSize: number;
-}> = ({ output, scale: s, fontSize }) => {
+  maxOutputLines: number;
+}> = ({ output, scale: s, fontSize, maxOutputLines }) => {
+  const { width } = useVideoConfig();
   if (output.kind === "image" && output.data) {
     return (
       <div
@@ -128,10 +130,29 @@ const CellOutput: React.FC<{
       : output.kind === "result"
         ? monokai.success
         : monokai.text;
-  const lines =
+  const lines: Array<string | FormattedOutputLine> =
     output.kind === "result"
       ? (getStructuredResultLines(output.text, false) ?? getDisplayLines(output.text))
       : getDisplayLines(output.text);
+  const notebookWidth = Math.round(width * 0.625);
+  const outputWidth = Math.max(120, notebookWidth - (16 * 2 + 12 + 12) * s);
+  const outputChars = Math.max(8, Math.floor(outputWidth / Math.max(1, fontSize * s * 0.62)));
+  const wrappedLines: Array<string | FormattedOutputLine> = [];
+  for (const line of lines) {
+    if (typeof line !== "string") {
+      wrappedLines.push(line);
+      continue;
+    }
+    if (line.length === 0) {
+      wrappedLines.push("");
+      continue;
+    }
+    for (const chunk of line.match(new RegExp(`.{1,${outputChars}}`, "g")) ?? [""]) {
+      wrappedLines.push(chunk);
+    }
+  }
+  const visibleLines = wrappedLines.slice(0, maxOutputLines);
+  const hiddenLineCount = Math.max(0, wrappedLines.length - visibleLines.length);
 
   return (
     <div
@@ -144,7 +165,7 @@ const CellOutput: React.FC<{
         whiteSpace: "pre-wrap",
       }}
     >
-      {lines.map((line, index) => (
+      {visibleLines.map((line, index) => (
         <div key={index} style={{ minHeight: 24 * s }}>
           {typeof line === "string"
             ? (line.length > 0 ? line : "\u00a0")
@@ -165,6 +186,11 @@ const CellOutput: React.FC<{
             ))}
         </div>
       ))}
+      {hiddenLineCount > 0 ? (
+        <div style={{ minHeight: 24 * s, color: monokai.muted }}>
+          {`... ${hiddenLineCount} more line${hiddenLineCount === 1 ? "" : "s"}`}
+        </div>
+      ) : null}
     </div>
   );
 };
@@ -180,7 +206,8 @@ export const Cell: React.FC<{
   scale?: number;
   fontSize?: number;
   collapsed?: boolean;
-}> = ({ cell, index, total, focusFrame, typingFrame, outputFrame, animationMode = "char", scale: s = 1, fontSize = 16, collapsed = false }) => {
+  maxOutputLines?: number;
+}> = ({ cell, index, total, focusFrame, typingFrame, outputFrame, animationMode = "char", scale: s = 1, fontSize = 16, collapsed = false, maxOutputLines = 10 }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
@@ -294,47 +321,67 @@ export const Cell: React.FC<{
   if (collapsed) {
     const firstLine = lines[0] || "";
     const lineCount = lines.length;
-    const outputCount = cell.outputs.length;
     const collapsedTokens = (tokenizedLines[0] || []);
+    const outputVisible = cell.outputs.length > 0 && outputFrame !== null && frame >= outputFrame;
+    const outputEntrance = outputVisible
+      ? spring({ frame, fps, delay: outputFrame!, config: { damping: 200 } })
+      : 0;
+    const outputOpacity = interpolate(outputEntrance, [0, 1], [0, 1]);
+    const outputTranslateY = interpolate(outputEntrance, [0, 1], [8, 0]);
 
     return (
-      <div
-        style={{
-          border: `${2 * s}px solid ${monokai.border}`,
-          borderRadius: 8 * s,
-          background: monokai.panel,
-          padding: `${8 * s}px ${16 * s}px`,
-          marginBottom: 10 * s,
-          opacity: 0.6,
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 12 * s }}>
-          <span style={{ color: monokai.muted, fontSize: (fontSize - 1) * s, flexShrink: 0 }}>
-            In [{cell.executionCount ?? " "}]:
-          </span>
-          <span
+      <div style={{ marginBottom: 10 * s, opacity: 0.85 }}>
+        <div
+          style={{
+            border: `${2 * s}px solid ${monokai.border}`,
+            borderRadius: 8 * s,
+            background: monokai.panel,
+            padding: `${8 * s}px ${16 * s}px`,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 12 * s }}>
+            <span style={{ color: monokai.muted, fontSize: (fontSize - 1) * s, flexShrink: 0 }}>
+              In [{cell.executionCount ?? " "}]:
+            </span>
+            <span
+              style={{
+                flex: 1,
+                fontSize: (fontSize + 1) * s,
+                lineHeight: `${Math.round(fontSize * 1.625) * s}px`,
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
+              <SyntaxLine tokens={collapsedTokens} />
+            </span>
+            {lineCount > 1 && (
+              <span style={{ color: monokai.muted, fontSize: (fontSize - 2) * s, flexShrink: 0 }}>
+                +{lineCount - 1} lines
+              </span>
+            )}
+          </div>
+        </div>
+
+        {outputVisible ? (
+          <div
             style={{
-              flex: 1,
-              fontSize: (fontSize + 1) * s,
-              lineHeight: `${Math.round(fontSize * 1.625) * s}px`,
-              whiteSpace: "nowrap",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
+              marginTop: 8 * s,
+              marginLeft: 18 * s,
+              paddingLeft: 12 * s,
+              borderLeft: `${2 * s}px solid ${monokai.border}`,
+              opacity: outputOpacity,
+              transform: `translateY(${outputTranslateY}px)`,
             }}
           >
-            <SyntaxLine tokens={collapsedTokens} />
-          </span>
-          {lineCount > 1 && (
-            <span style={{ color: monokai.muted, fontSize: (fontSize - 2) * s, flexShrink: 0 }}>
-              +{lineCount - 1} lines
-            </span>
-          )}
-          {outputCount > 0 && (
-            <span style={{ color: monokai.success, fontSize: (fontSize - 2) * s, flexShrink: 0 }}>
-              ✓
-            </span>
-          )}
-        </div>
+            <div style={{ color: monokai.muted, fontSize: (fontSize - 4) * s, marginBottom: 4 * s }}>
+              Out [{cell.executionCount ?? " "}]:
+            </div>
+            {cell.outputs.map((output, i) => (
+              <CellOutput key={i} output={output} scale={s} fontSize={fontSize} maxOutputLines={maxOutputLines} />
+            ))}
+          </div>
+        ) : null}
       </div>
     );
   }
@@ -438,7 +485,7 @@ export const Cell: React.FC<{
             Out [{cell.executionCount ?? " "}]:
           </div>
           {cell.outputs.map((output, i) => (
-            <CellOutput key={i} output={output} scale={s} fontSize={fontSize} />
+            <CellOutput key={i} output={output} scale={s} fontSize={fontSize} maxOutputLines={maxOutputLines} />
           ))}
         </div>
       )}

@@ -84,6 +84,8 @@ type RenderConfig = {
   quality?: Quality;
   aspect?: Aspect;
   fontSize?: number;
+  maxOutputLines?: number;
+  collapseCodeCellsOver?: number;
 };
 
 // ── YAML template ──────────────────────────────────────────────────
@@ -99,6 +101,8 @@ type TemplateYaml = {
   quality?: string;
   aspect?: string;
   fontSize?: number;
+  maxOutputLines?: number;
+  collapseCodeCellsOver?: number;
 };
 
 function loadTemplate(templatePath: string): Partial<RenderConfig> {
@@ -123,6 +127,8 @@ function loadTemplate(templatePath: string): Partial<RenderConfig> {
   if (yaml.quality) config.quality = yaml.quality as Quality;
   if (yaml.aspect) config.aspect = yaml.aspect as Aspect;
   if (yaml.fontSize) config.fontSize = yaml.fontSize;
+  if (yaml.maxOutputLines) config.maxOutputLines = yaml.maxOutputLines;
+  if (yaml.collapseCodeCellsOver) config.collapseCodeCellsOver = yaml.collapseCodeCellsOver;
 
   return config;
 }
@@ -137,7 +143,11 @@ Options:
   -o, --output <path>        Output video path (default: out/video.mp4)
   --template <path>          Load render settings from YAML template
   --animation <mode>         char | word | line | block | present (default: char)
-  --font-size <n>            Base font size in px (default: 16)
+  --font-size, --font_size <n>
+                             Base font size in px (default: 16)
+  --max-output-lines <n>     Truncate rendered outputs after N wrapped lines (default: 10)
+  --collapse-code-cells-over <n>
+                             Collapse past code cells longer than N lines (default: 5)
   --force, -f                Re-execute notebook (ignore cache)
   --python <path>            Python interpreter path
   --venv <path>              Virtual environment path
@@ -162,7 +172,9 @@ Template:
 Examples:
   ntui render notebook.ipynb
   ntui render notebook.ipynb -o out.mp4 --template template.yaml
-  ntui render notebook.ipynb --animation line --font-size 18`);
+  ntui render notebook.ipynb --animation line --font-size 18
+  ntui render notebook.ipynb --font_size 18
+  ntui render notebook.ipynb --max-output-lines 12 --collapse-code-cells-over 8`);
   process.exit(1);
 }
 
@@ -186,8 +198,12 @@ function parseCliArgs(argv: string[]): { templatePath?: string; overrides: Parti
         console.error(`Invalid animation mode: ${mode}`);
         usage();
       }
-    } else if (v === "--font-size") {
+    } else if (v === "--font-size" || v === "--font_size") {
       overrides.fontSize = parseInt(argv[++i] ?? "16", 10);
+    } else if (v === "--max-output-lines") {
+      overrides.maxOutputLines = parseInt(argv[++i] ?? "10", 10);
+    } else if (v === "--collapse-code-cells-over") {
+      overrides.collapseCodeCellsOver = parseInt(argv[++i] ?? "5", 10);
     } else if (v === "--force" || v === "-f") {
       overrides.force = true;
     } else if (v === "--python") {
@@ -238,6 +254,8 @@ function resolveConfig(templateConfig: Partial<RenderConfig>, cliOverrides: Part
     quality: merged.quality,
     aspect: merged.aspect,
     fontSize: merged.fontSize,
+    maxOutputLines: merged.maxOutputLines,
+    collapseCodeCellsOver: merged.collapseCodeCellsOver,
   };
 }
 
@@ -296,6 +314,8 @@ async function main() {
   console.log(`  Animation:  ${config.animationMode}`);
   console.log(`  Resolution: ${config.width}x${config.height} @ ${config.fps}fps`);
   if (config.fontSize) console.log(`  Font size:  ${config.fontSize}px`);
+  console.log(`  Max output: ${config.maxOutputLines ?? 10} lines`);
+  console.log(`  Collapse >: ${config.collapseCodeCellsOver ?? 5} lines`);
 
   // --- Step 1: Capture or use cache ---
   const notebookHash = await hashFile(config.notebookPath);
@@ -320,6 +340,8 @@ async function main() {
   {
     const parsed = JSON.parse(propsJson);
     if (config.fontSize) parsed.fontSize = config.fontSize;
+    if (config.maxOutputLines) parsed.maxOutputLines = config.maxOutputLines;
+    if (config.collapseCodeCellsOver) parsed.collapseCodeCellsOver = config.collapseCodeCellsOver;
     propsJson = JSON.stringify(parsed, null, 2);
   }
 
@@ -358,7 +380,12 @@ async function executeAndCache(config: RenderConfig, cacheKey: string): Promise<
     venvPath: config.venvPath,
   });
 
-  const props = { timeline, animationMode: config.animationMode };
+  const props = {
+    timeline,
+    animationMode: config.animationMode,
+    maxOutputLines: config.maxOutputLines ?? 10,
+    collapseCodeCellsOver: config.collapseCodeCellsOver ?? 5,
+  };
   const json = JSON.stringify(props, null, 2);
   await saveCachedTimeline(cacheKey, json);
   console.log(`  Cached as ${cacheKey}`);

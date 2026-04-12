@@ -7,6 +7,7 @@
 import { isAbsolute, join } from "node:path";
 import { deserializeIpynb } from "./ipynb";
 import { executeNotebookCell } from "./notebook-execution";
+import { parseNtuiCommands, stripNtuiCommands } from "./ntui-commands";
 import type { NotebookOutput } from "./types";
 import { PythonSession, resolvePython } from "./python-session";
 
@@ -55,9 +56,11 @@ export async function captureTimeline(opts: CaptureOptions): Promise<Timeline> {
 
   for (let i = 0; i < doc.cells.length; i++) {
     const cell = doc.cells[i]!;
+    const parsedCommands = parseNtuiCommands(cell.source);
+    const visibleSource = parsedCommands.bodySource;
 
     events.push({ type: "focus", ts: ts(), cellIndex: i });
-    events.push({ type: "source", ts: ts(), cellIndex: i, source: cell.source });
+    events.push({ type: "source", ts: ts(), cellIndex: i, source: visibleSource });
 
     if (cell.kind === "markdown") {
       console.log(`  [${i + 1}/${doc.cells.length}] Markdown cell (skipping execution)`);
@@ -108,7 +111,7 @@ export async function captureTimeline(opts: CaptureOptions): Promise<Timeline> {
   await session.stop();
 
   return {
-    cells: doc.cells.map((c) => ({ source: c.source, kind: c.kind })),
+    cells: doc.cells.map((c) => ({ source: stripNtuiCommands(c.source), kind: c.kind })),
     events,
   };
 }

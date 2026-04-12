@@ -52,7 +52,12 @@ const HELP = `
       -o, --output <path>   Output video path (default: out/video.mp4)
       --template <path>     Load render settings from YAML template
       --animation <mode>    char | word | line | block | present (default: char)
-      --font-size <n>       Base font size in px (default: 16)
+      --font-size, --font_size <n>
+                            Base font size in px (default: 16)
+      --max-output-lines <n>
+                           Truncate rendered outputs after N wrapped lines (default: 10)
+      --collapse-code-cells-over <n>
+                           Collapse past code cells longer than N lines (default: 5)
       --quality <preset>    sd | hd | 4k (default: hd)
       --aspect <ratio>      horizontal | vertical | square (default: horizontal)
       --force, -f           Re-execute notebook (ignore cache)
