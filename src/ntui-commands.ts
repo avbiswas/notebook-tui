@@ -85,7 +85,7 @@ export function parseNtuiCommands(source: string): ParsedNtuiCommands {
     const trimmed = line.trim();
 
     if (scanningPreamble) {
-      const match = line.match(/^\s*#\s*ntui:\s*(.*)$/);
+      const match = line.match(/^\s*#\s*ntui:?\s*(.*)$/);
       if (match) {
         commandLines.push(line);
         Object.assign(commands, parseCommandPayload(match[1] ?? ""));

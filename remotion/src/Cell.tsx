@@ -9,6 +9,7 @@ import {
 import { monokai } from "./theme";
 import { SyntaxLine, useTokenizedSource } from "./SyntaxLine";
 import type { CellState, AnimationMode } from "./types";
+import { lineInRanges, parseHighlightRanges } from "./ntui";
 
 /**
  * Build a schedule of "at which frame does character N appear" using
@@ -195,6 +196,67 @@ export const CellOutput: React.FC<{
   );
 };
 
+export const PreviewSourcePanel: React.FC<{
+  source: string;
+  scale: number;
+  fontSize: number;
+  highlightRanges?: string;
+  highlightFocusRanges?: string;
+  highlightIntensity?: number;
+}> = ({ source, scale: s, fontSize, highlightRanges, highlightFocusRanges, highlightIntensity = 1 }) => {
+  const tokenizedLines = useTokenizedSource(source);
+  const lines = source.split("\n");
+  const highlighted = parseHighlightRanges(highlightRanges);
+  const focused = parseHighlightRanges(highlightFocusRanges);
+  const dimOthers = focused.length > 0;
+
+  return (
+    <div style={{ display: "flex", gap: 12 * s }}>
+      <div
+        style={{
+          color: monokai.muted,
+          textAlign: "right",
+          minWidth: 30 * s,
+          fontSize: fontSize * s,
+          lineHeight: `${Math.round(fontSize * 1.6) * s}px`,
+        }}
+      >
+        {lines.map((_, index) => (
+          <div key={index}>{index + 1}</div>
+        ))}
+      </div>
+      <div
+        style={{
+          flex: 1,
+          fontSize: fontSize * s,
+          lineHeight: `${Math.round(fontSize * 1.6) * s}px`,
+        }}
+      >
+        {lines.map((line, index) => {
+          const lineNumber = index + 1;
+          const isHighlighted = lineInRanges(lineNumber, highlighted) || lineInRanges(lineNumber, focused);
+          const isFocused = lineInRanges(lineNumber, focused);
+          return (
+            <div
+              key={index}
+              style={{
+                padding: `0 ${6 * s}px`,
+                marginBottom: 2 * s,
+                borderRadius: 6 * s,
+                background: isHighlighted ? `rgba(102, 217, 239, ${0.12 * highlightIntensity})` : "transparent",
+                opacity: dimOthers && !isFocused ? 1 - 0.68 * highlightIntensity : 1,
+                borderLeft: isFocused ? `${3 * s}px solid rgba(166, 226, 46, ${highlightIntensity})` : `${3 * s}px solid transparent`,
+              }}
+            >
+              <SyntaxLine tokens={tokenizedLines[index] ?? [{ text: line, color: monokai.text }]} />
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
 export const Cell: React.FC<{
   cell: CellState;
   index: number;
@@ -205,11 +267,14 @@ export const Cell: React.FC<{
   animationMode?: AnimationMode;
   sourceFade?: boolean;
   inlineOutputVisible?: boolean;
+  highlightRanges?: string;
+  highlightFocusRanges?: string;
+  highlightIntensity?: number;
   scale?: number;
   fontSize?: number;
   collapsed?: boolean;
   maxOutputLines?: number;
-}> = ({ cell, index, total, focusFrame, typingFrame, outputFrame, animationMode = "char", sourceFade = false, inlineOutputVisible = true, scale: s = 1, fontSize = 16, collapsed = false, maxOutputLines = 10 }) => {
+}> = ({ cell, index, total, focusFrame, typingFrame, outputFrame, animationMode = "char", sourceFade = false, inlineOutputVisible = true, highlightRanges, highlightFocusRanges, highlightIntensity = 1, scale: s = 1, fontSize = 16, collapsed = false, maxOutputLines = 10 }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
@@ -219,6 +284,9 @@ export const Cell: React.FC<{
   const lines = cell.source.split("\n");
   const totalChars = cell.source.length;
   const tokenizedLines = useTokenizedSource(cell.source);
+  const highlighted = parseHighlightRanges(highlightRanges);
+  const focusedHighlights = parseHighlightRanges(highlightFocusRanges);
+  const dimOthers = focusedHighlights.length > 0;
 
   // Build typing schedule once (deterministic, memoized by source)
   const typingSchedule = useMemo(
@@ -463,7 +531,24 @@ export const Cell: React.FC<{
             }
             return (
             <div key={i}>
-              <SyntaxLine tokens={clippedTokens} />
+              <div
+                style={{
+                  padding: `0 ${6 * s}px`,
+                  marginBottom: 2 * s,
+                  borderRadius: 6 * s,
+                  background:
+                    lineInRanges(i + 1, highlighted) || lineInRanges(i + 1, focusedHighlights)
+                      ? `rgba(102, 217, 239, ${0.12 * highlightIntensity})`
+                      : "transparent",
+                  opacity: dimOthers && !lineInRanges(i + 1, focusedHighlights) ? 1 - 0.68 * highlightIntensity : 1,
+                  borderLeft:
+                    lineInRanges(i + 1, focusedHighlights)
+                      ? `${3 * s}px solid rgba(166, 226, 46, ${highlightIntensity})`
+                      : `${3 * s}px solid transparent`,
+                }}
+              >
+                <SyntaxLine tokens={clippedTokens} />
+              </div>
               {cursorVisible && i === visibleLineCount - 1 && (
                 <span
                   style={{

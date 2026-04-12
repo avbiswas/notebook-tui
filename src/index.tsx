@@ -7,7 +7,7 @@ import {
 } from "@opentui/core";
 import { createRoot, useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
 import { basename, isAbsolute, join } from "node:path";
-import { tokenizeSource } from "../remotion/src/SyntaxLine";
+import { tokenizeSource } from "../remotion/src/shiki";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   appendCellOutput,
@@ -94,7 +94,10 @@ const HELP_LINES = [
   "ntui Commands",
   "Leading `# ntui:` lines define presentation commands and are hidden while rendering",
   "Syntax: # ntui: key=value key2=value2",
-  "Example: # ntui: output=preview input=fade",
+  "Refs: @ current code, @o current output, 1 cell 1 code, 1o cell 1 output, parse symbolic id",
+  "Examples: # ntui: label=\"Parsing\" highlight=4-6 highlight_focus=5",
+  "          # ntui: id=parse preview=@,@o,parseo preview_layout=columns",
+  "          # ntui: source=preview callout=\"This is the core step\"",
   "Normal Python comments still render as-is",
   "",
   "Commands",

@@ -10,8 +10,9 @@ export const PreviewOverlay: React.FC<{
   scale?: number;
   title: string;
   subtitle?: string;
+  callout?: string;
   children: React.ReactNode;
-}> = ({ visible, startFrame, endFrame = null, exitDurationFrames = 12, scale: s = 1, title, subtitle, children }) => {
+}> = ({ visible, startFrame, endFrame = null, exitDurationFrames = 12, scale: s = 1, title, subtitle, callout, children }) => {
   const frame = useCurrentFrame();
   const { fps, width, height } = useVideoConfig();
 
@@ -106,6 +107,21 @@ export const PreviewOverlay: React.FC<{
         >
           {children}
         </div>
+        {callout ? (
+          <div
+            style={{
+              marginTop: 14 * s,
+              padding: `${10 * s}px ${12 * s}px`,
+              borderRadius: 10 * s,
+              background: "rgba(38, 38, 38, 0.95)",
+              border: `${1 * s}px solid ${monokai.border}`,
+              color: monokai.text,
+              fontSize: 15 * s,
+            }}
+          >
+            {callout}
+          </div>
+        ) : null}
       </div>
     </AbsoluteFill>
   );

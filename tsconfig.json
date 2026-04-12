@@ -26,5 +26,7 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false
-  }
+  },
+  "include": ["src", "bin"],
+  "exclude": ["remotion", "test_env", "out", "node_modules"]
 }
