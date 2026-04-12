@@ -1,17 +1,33 @@
 {
   "name": "notebook-tui",
+  "version": "0.1.0",
   "module": "src/index.tsx",
   "type": "module",
-  "private": true,
   "bin": {
-    "ntui": "bin/ntui.ts"
+    "ntui": "bin/ntui.ts",
+    "notebook-tui": "bin/ntui.ts"
   },
   "scripts": {
     "dev": "bun run --watch src/index.tsx",
     "start": "bun run src/index.tsx",
     "render": "bun run src/render.tsx",
     "video": "bun run src/render-video.ts",
-    "init-template": "bun run src/init-template.ts"
+    "init-template": "bun run src/init-template.ts",
+    "postinstall": "node scripts/postinstall-remotion.mjs"
+  },
+  "files": [
+    "AGENTS",
+    "bin",
+    "remotion/package.json",
+    "remotion/src",
+    "remotion/tsconfig.json",
+    "scripts",
+    "src",
+    "README.md"
+  ],
+  "engines": {
+    "bun": ">=1.1.0",
+    "node": ">=18"
   },
   "devDependencies": {
     "@types/bun": "latest"

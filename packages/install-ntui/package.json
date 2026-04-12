@@ -1,0 +1,15 @@
+{
+  "name": "install-ntui",
+  "version": "0.1.1",
+  "type": "module",
+  "bin": {
+    "install-ntui": "bin/install-ntui.mjs"
+  },
+  "files": [
+    "bin",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

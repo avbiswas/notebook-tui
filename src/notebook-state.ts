@@ -28,12 +28,8 @@ function clipboardCommands(): string[][] {
   ];
 }
 
-function writeSystemClipboard(data: ClipboardData): void {
-  const text =
-    data.kind === "text"
-      ? data.text
-      : data.cells.map((cell) => cell.source).join("\n\n");
-
+/** Copy plain text to the OS clipboard (pbcopy, wl-copy, xclip, clip, …). */
+export function copyStringToSystemClipboard(text: string): void {
   for (const command of clipboardCommands()) {
     try {
       const proc = spawn(command, {
@@ -50,6 +46,14 @@ function writeSystemClipboard(data: ClipboardData): void {
   }
 }
 
+function writeSystemClipboard(data: ClipboardData): void {
+  const text =
+    data.kind === "text"
+      ? data.text
+      : data.cells.map((cell) => cell.source).join("\n\n");
+  copyStringToSystemClipboard(text);
+}
+
 function cloneDocument(document: NotebookDocument): NotebookDocument {
   return JSON.parse(JSON.stringify(document)) as NotebookDocument;
 }
@@ -64,23 +68,20 @@ export function createCell(id: string, source = "", kind: CellKind = "code"): No
   };
 }
 
+/** Default first cell when starting without a notebook file (shown as markdown). */
+const DEFAULT_NOTEBOOK_INTRO_MARKDOWN = `# Welcome to notebook-tui
+
+Vim-style notebook editing in the terminal. **Space ?** or **Shift+H** for full help.
+
+- **i** insert · **Esc** normal · **{** / **}** navigate cells
+- **R** run cell · **Space o** new cell · **Space d** delete cell · **:w** save · **:q** quit
+`;
+
 export function createInitialDocument(): NotebookDocument {
   return {
     cells: [
-      createCell(
-        "cell-1",
-        [
-          "message = 'Notebook TUI'",
-          "message",
-        ].join("\n"),
-      ),
-      createCell(
-        "cell-2",
-        [
-          "for index in range(3):",
-          "    print(f'Line {index}')",
-        ].join("\n"),
-      ),
+      createCell("cell-1", DEFAULT_NOTEBOOK_INTRO_MARKDOWN, "markdown"),
+      createCell("cell-2", 'print("Hello, World!")', "code"),
     ],
     clipboard: null,
     nextCellId: 3,

@@ -10,7 +10,7 @@
 
 import { createHash } from "node:crypto";
 import { isAbsolute, join, dirname, resolve } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import { captureTimeline, type AnimationMode } from "./capture";
 
@@ -345,6 +345,7 @@ async function main() {
     propsJson = JSON.stringify(parsed, null, 2);
   }
 
+  mkdirSync(dirname(PROPS_PATH), { recursive: true });
   await Bun.write(PROPS_PATH, propsJson);
 
   // --- Step 2: Render with Remotion ---

@@ -15,6 +15,7 @@ import {
   backspaceAtCursor,
   clearCellOutputs,
   copySelectedCells,
+  copyStringToSystemClipboard,
   copyVisualLineSelection,
   copyVisualSelection,
   changeWordForward,
@@ -65,45 +66,92 @@ import {
 } from "./output-model";
 import { PythonSession, resolvePython } from "./python-session";
 import { themes } from "./theme";
-import type { AppState, NotebookCell, NotebookOutput } from "./types";
+import type { AppState, KernelStatus, NotebookCell, NotebookOutput } from "./types";
 
 const OUTPUT_PREVIEW_MAX_LINES = 8;
 
 const HELP_LINES = [
   "Navigation",
-  "h j k l: move within the current cell",
-  "<Space> j / <Space> k: move to next / previous cell",
-  "<Space> vv: cell visual selection",
+  "  { / }        previous / next cell",
+  "  h j k l      move cursor inside cell",
+  "  w / b / e    word forward / back / end",
+  "  0 / $ / ^    line start / end / first non-blank",
+  "  gg / G       top / bottom of cell",
   "",
   "Editing",
-  "i / a / A: insert / append / append at end of line",
-  "o / O: insert a new line below / above in the current cell",
-  "<Space> o or <Space> B: new cell below",
-  "<Space> O or <Space> A: new cell above",
-  "dd / cc / yy / p / P / u / Ctrl-R: vim-style edits",
+  "  i / a        insert before / after cursor",
+  "  I / A        insert at line start / end",
+  "  o / O        new line below / above",
+  "  dd           delete line  ·  cc  change line  ·  yy  yank line",
+  "  p / P        paste below / above",
+  "  u / Ctrl+R   undo / redo",
+  "  v / V        visual / visual-line selection",
+  "",
+  "Cells",
+  "  Space o      new cell below  ·  Space O  new cell above",
+  "  Space d      delete cell",
+  "  Space vv     cell visual selection",
+  "  Shift+M      toggle code / markdown",
   "",
   "Execution",
-  "r or Shift+Enter: run focused cell",
-  ":r: run all cells",
-  ":clear: clear outputs",
+  "  R or Shift+Enter   run focused cell",
+  "  :r           run all cells",
+  "  :clear       clear outputs",
   "",
   "Outputs",
-  "Shift+E: expand the focused cell output",
-  "Outputs no longer take focus during navigation",
+  "  Shift+E      expand output view",
   "",
-  "ntui Commands",
-  "Leading `# ntui:` lines define presentation commands and are hidden while rendering",
-  "Syntax: # ntui: key=value key2=value2",
-  "Refs: @ current code, @o current output, 1 cell 1 code, 1o cell 1 output, parse symbolic id",
-  "Examples: # ntui: label=\"Parsing\" highlight=4-6 highlight_focus=5",
-  "          # ntui: id=parse preview=@,@o,parseo preview_layout=columns",
-  "          # ntui: source=preview callout=\"This is the core step\"",
-  "Normal Python comments still render as-is",
+  "Commands (press : then type)",
+  "  :w   save  ·  :q  quit  ·  :wq  save & quit",
+  "  :r   run all  ·  :clear  clear outputs",
   "",
-  "Commands",
-  ":w / :q / :wq: save / quit / save and quit",
-  "H or Esc: close this help",
+  "ntui Rendering Commands",
+  "  Add # ntui: key=value lines at the top of a code cell.",
+  "  These directives are hidden during rendering / video export.",
+  "",
+  "  label=\"Title\"           set a label shown in the video overlay",
+  "  id=myid                 give the cell a symbolic id for cross-references",
+  "  highlight=4-6           highlight source lines 4–6",
+  "  highlight_focus=5       emphasize line 5 within the highlight",
+  "  callout=\"Note text\"     display a callout banner during preview",
+  "  source=preview          show this cell's source in preview mode",
+  "  output=preview          show this cell's output in preview mode",
+  "  preview=@,@o,2,2o       preview specific targets (@ = this cell, 2 = cell 2, o suffix = output)",
+  "  preview_layout=columns  layout: center | columns | rows | grid | main_rail",
+  "  input=char              typing animation: char | word | line | block | fade | present",
+  "",
+  "  input modes:",
+  "    char     character-by-character typing (default)",
+  "    word     word-by-word typing",
+  "    line     line-by-line typing",
+  "    block    entire source appears at once",
+  "    fade     instant reveal with fade-in effect",
+  "    present  instant reveal, minimal delay",
+  "",
+  "  Example:",
+  "  # ntui: label=\"Parsing\" highlight=4-6 highlight_focus=5",
+  "  # ntui: id=parse preview=@,@o preview_layout=columns",
+  "  # ntui: callout=\"This is the core step\"",
+  "  # ntui: input=fade",
+  "",
+  "Esc or Shift+H: close this help",
 ];
+
+function getStatusHint(mode: AppState["ui"]["mode"]): string {
+  switch (mode) {
+    case "insert":
+      return "Esc: normal  ·  type to edit  ·  arrows: move";
+    case "visual":
+    case "visual_line":
+      return "Esc: cancel  ·  y: yank  ·  d: delete  ·  c: change  ·  > <: indent";
+    case "cell_visual":
+      return "Esc: cancel  ·  { }: extend  ·  d: delete  ·  y: yank";
+    case "command":
+      return "Enter: execute  ·  Esc: cancel  ·  :w :q :wq :r :clear";
+    default:
+      return "i: edit  ·  { }: cells  ·  R: run  ·  Sp o/O: new cell ↓/↑  ·  Sp d: delete  ·  :w save  ·  Sp ?: help";
+  }
+}
 
 type ParsedArgs = {
   pythonPath?: string;
@@ -149,6 +197,19 @@ function withStatus(state: AppState, statusMessage: string): AppState {
   };
 }
 
+function formatKernelProviderForStatus(
+  provider: AppState["kernel"]["provider"],
+  kernelStatus: KernelStatus,
+): string {
+  if (provider !== "bridge") {
+    return provider;
+  }
+  if (kernelStatus === "starting") {
+    return "bridge";
+  }
+  return "bridge (ipykernel not installed, some features may be missing)";
+}
+
 function isPrintableKey(sequence: string) {
   return sequence.length === 1 && sequence >= " " && sequence !== "\u007f";
 }
@@ -171,6 +232,80 @@ function renderEditorLines(source: string, cell: NotebookCell, state: AppState) 
     const isCursorLine = index === cursor.row;
     return { lineNumber: index + 1, text: line, isCursorLine };
   });
+}
+
+type MdToken = { text: string; color: string; bold?: boolean; italic?: boolean };
+
+function parseInlineMarkdown(text: string, theme: { text: string; accent: string; muted: string; success: string }): MdToken[] {
+  if (text.length === 0) return [];
+  const tokens: MdToken[] = [];
+  const pattern = /(\*\*\*(.+?)\*\*\*|\*\*(.+?)\*\*|\*(.+?)\*|`(.+?)`)/g;
+  let lastIndex = 0;
+  let match;
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      tokens.push({ text: text.slice(lastIndex, match.index), color: theme.text });
+    }
+    if (match[2] !== undefined) {
+      tokens.push({ text: "***", color: theme.muted });
+      tokens.push({ text: match[2], color: theme.text, bold: true, italic: true });
+      tokens.push({ text: "***", color: theme.muted });
+    } else if (match[3] !== undefined) {
+      tokens.push({ text: "**", color: theme.muted });
+      tokens.push({ text: match[3], color: theme.text, bold: true });
+      tokens.push({ text: "**", color: theme.muted });
+    } else if (match[4] !== undefined) {
+      tokens.push({ text: "*", color: theme.muted });
+      tokens.push({ text: match[4], color: theme.text, italic: true });
+      tokens.push({ text: "*", color: theme.muted });
+    } else if (match[5] !== undefined) {
+      tokens.push({ text: "`", color: theme.muted });
+      tokens.push({ text: match[5], color: theme.success });
+      tokens.push({ text: "`", color: theme.muted });
+    }
+    lastIndex = match.index + match[0].length;
+  }
+  if (lastIndex < text.length) {
+    tokens.push({ text: text.slice(lastIndex), color: theme.text });
+  }
+  return tokens;
+}
+
+function tokenizeMarkdownLine(line: string, theme: { text: string; accent: string; muted: string; success: string }): MdToken[] {
+  const headerMatch = line.match(/^(#{1,6}\s)/);
+  if (headerMatch) {
+    const tokens: MdToken[] = [{ text: headerMatch[0], color: theme.muted, bold: true }];
+    const rest = line.slice(headerMatch[0].length);
+    if (rest.length > 0) {
+      tokens.push({ text: rest, color: theme.accent, bold: true });
+    }
+    return tokens;
+  }
+  const quoteMatch = line.match(/^(>\s*)/);
+  if (quoteMatch) {
+    return [
+      { text: quoteMatch[0], color: theme.accent, italic: true },
+      ...parseInlineMarkdown(line.slice(quoteMatch[0].length), theme),
+    ];
+  }
+  const listMatch = line.match(/^(\s*(?:[-*+]|\d+\.)\s)/);
+  if (listMatch) {
+    return [
+      { text: listMatch[0], color: theme.accent },
+      ...parseInlineMarkdown(line.slice(listMatch[0].length), theme),
+    ];
+  }
+  if (/^[-*_]{3,}\s*$/.test(line)) {
+    return [{ text: line, color: theme.muted }];
+  }
+  return parseInlineMarkdown(line, theme);
+}
+
+function tokenizeMarkdownSource(
+  source: string,
+  theme: { text: string; accent: string; muted: string; success: string },
+): MdToken[][] {
+  return getLines(source).map((line) => tokenizeMarkdownLine(line, theme));
 }
 
 function renderImageOutput(output: Extract<NotebookOutput, { kind: "image" }>, theme: {
@@ -403,12 +538,6 @@ function getScrollTargetId(state: AppState): string | null {
   ) {
     return `output-${focusedCell.id}`;
   }
-  // Markdown cells in display modes have no per-row cursor, scroll the whole
-  // cell into view instead.
-  if (focusedCell.kind === "markdown" && state.ui.mode !== "insert") {
-    return focusedCell.id;
-  }
-  // Editor focus: target the actual cursor row line box.
   return "cursor-line";
 }
 
@@ -426,9 +555,6 @@ function scrollFocusedIntoView(
     return;
   }
 
-  // Force yoga to recompute positions for the freshly reconciled tree, then
-  // sync those positions back to the renderable cache so child.y / viewport.y
-  // are up to date for this paint.
   try {
     rendererRoot.calculateLayout();
   } catch {
@@ -440,8 +566,6 @@ function scrollFocusedIntoView(
     | { y: number; height: number }
     | undefined;
 
-  // Fallback chain: if cursor-line wasn't found (e.g. rendered before id was
-  // applied), use the focused cell box.
   if (!target) {
     const focusedCell = getFocusedCell(state);
     if (focusedCell) {
@@ -525,9 +649,24 @@ function expandFocusedCellOutput(state: AppState): AppState {
   };
 }
 
+type StyledChar = { text: string; fg: string; bold?: boolean; italic?: boolean };
+
+function renderStyledChar(char: StyledChar, key: string, bgOverride?: string) {
+  if (char.bold && char.italic) {
+    return <b key={key}><i fg={char.fg} bg={bgOverride}>{char.text}</i></b>;
+  }
+  if (char.bold) {
+    return <b key={key} fg={char.fg} bg={bgOverride}>{char.text}</b>;
+  }
+  if (char.italic) {
+    return <i key={key} fg={char.fg} bg={bgOverride}>{char.text}</i>;
+  }
+  return <span key={key} fg={char.fg} bg={bgOverride}>{char.text}</span>;
+}
+
 function renderActiveLine(
   line: string,
-  lineTokens: Array<{ text: string; color: string }> | undefined,
+  lineTokens: Array<{ text: string; color: string; bold?: boolean; italic?: boolean }> | undefined,
   isActive: boolean,
   isCursorLine: boolean,
   cursorCol: number,
@@ -542,13 +681,12 @@ function renderActiveLine(
   selection: { start: number; end: number } | null,
   lineStartOffset: number,
 ) {
-  const text = line.length === 0 ? " " : line;
-  const chars: Array<{ text: string; fg: string }> = [];
+  const chars: StyledChar[] = [];
 
   if (lineTokens && line.length > 0) {
     for (const token of lineTokens) {
       for (const ch of token.text) {
-        chars.push({ text: ch, fg: token.color });
+        chars.push({ text: ch, fg: token.color, bold: token.bold, italic: token.italic });
       }
     }
   }
@@ -562,12 +700,8 @@ function renderActiveLine(
   if (!selection) {
     if (!isActive || !isCursorLine) {
       return (
-        <text fg={theme.text}>
-          {chars.map((char, index) => (
-            <span key={`plain-${index}`} fg={char.fg}>
-              {char.text}
-            </span>
-          ))}
+        <text fg={theme.text} truncate>
+          {chars.map((char, index) => renderStyledChar(char, `plain-${index}`))}
         </text>
       );
     }
@@ -576,18 +710,10 @@ function renderActiveLine(
 
     if (mode === "insert") {
       return (
-        <text fg={theme.text}>
-          {chars.slice(0, cursorIndex).map((char, index) => (
-            <span key={`before-${index}`} fg={char.fg}>
-              {char.text}
-            </span>
-          ))}
+        <text fg={theme.text} truncate>
+          {chars.slice(0, cursorIndex).map((char, index) => renderStyledChar(char, `before-${index}`))}
           <span fg={theme.borderActive}>|</span>
-          {chars.slice(cursorIndex).map((char, index) => (
-            <span key={`after-${index}`} fg={char.fg}>
-              {char.text}
-            </span>
-          ))}
+          {chars.slice(cursorIndex).map((char, index) => renderStyledChar(char, `after-${index}`))}
         </text>
       );
     }
@@ -595,19 +721,15 @@ function renderActiveLine(
     const cursorBg = theme.borderActive;
 
     return (
-      <text fg={theme.text}>
+      <text fg={theme.text} truncate>
         {chars.map((char, index) =>
           index === cursorIndex ? (
-            <span key={`cursor-${index}`} fg="#000000" bg={cursorBg}>
-              {char.text}
-            </span>
+            renderStyledChar({ ...char, fg: "#000000" }, `cursor-${index}`, cursorBg)
           ) : (
-            <span key={`char-${index}`} fg={char.fg}>
-              {char.text}
-            </span>
+            renderStyledChar(char, `char-${index}`)
           ),
         )}
-        {cursorIndex >= line.length ? (
+        {cursorIndex >= line.length && line.length > 0 ? (
           <span key="cursor-eol" fg="#000000" bg={cursorBg}>
             {" "}
           </span>
@@ -616,7 +738,7 @@ function renderActiveLine(
     );
   }
 
-  const spans: Array<{ text: string; fg: string; bg?: string }> = [];
+  const spans: Array<{ text: string; fg: string; bg?: string; bold?: boolean; italic?: boolean }> = [];
   const cursorIndex = Math.min(cursorCol, line.length);
 
   for (let index = 0; index < chars.length; index += 1) {
@@ -628,6 +750,8 @@ function renderActiveLine(
 
     spans.push({
       text: char.text,
+      bold: char.bold,
+      italic: char.italic,
       fg: cursor
         ? "#000000"
         : selected
@@ -641,16 +765,16 @@ function renderActiveLine(
     });
   }
 
-  if (isActive && isCursorLine && cursorCol >= line.length) {
+  if (isActive && isCursorLine && cursorCol >= line.length && line.length > 0) {
     spans.push({ text: " ", fg: "#000000", bg: theme.borderActive });
   }
 
   return (
-    <text fg={theme.text}>
-      {spans.map((span, index) => (
-        <span key={`span-${index}`} fg={span.fg} bg={span.bg}>
-          {span.text}
-        </span>
+    <text fg={theme.text} truncate>
+      {spans.map((s, index) => renderStyledChar(
+        { text: s.text, fg: s.fg, bold: s.bold, italic: s.italic },
+        `span-${index}`,
+        s.bg,
       ))}
     </text>
   );
@@ -677,7 +801,8 @@ function App() {
   const outputDialogScrollRef = useRef<ScrollBoxRenderable | null>(null);
   const theme = themes[state.ui.themeName];
   const notebookWidth = Math.min(120, Math.max(72, width - 6));
-  const bodyHeight = Math.max(10, height - 4);
+  const statusBarHeight = 5;
+  const bodyHeight = Math.max(10, height - statusBarHeight);
   const [runningTick, setRunningTick] = useState(0);
 
   useEffect(() => {
@@ -1715,6 +1840,43 @@ function App() {
           return repeatLastFind(current, false);
         case ",":
           return repeatLastFind(current, true);
+        case "/":
+          if (current.ui.pendingMotion === "leader" && key.shift) {
+            return {
+              ...current,
+              ui: {
+                ...current.ui,
+                helpOpen: true,
+                outputDialogCellId: null,
+                pendingMotion: null,
+                pendingOperator: null,
+                statusMessage: "Shortcut help.",
+              },
+            };
+          }
+          if (
+            current.ui.pendingMotion === "goto" ||
+            current.ui.pendingMotion === "leader" ||
+            current.ui.pendingMotion === "leader_v"
+          ) {
+            return withStatus(current, "Cancelled pending motion.");
+          }
+          return current;
+        case "?":
+          if (current.ui.pendingMotion === "leader") {
+            return {
+              ...current,
+              ui: {
+                ...current.ui,
+                helpOpen: true,
+                outputDialogCellId: null,
+                pendingMotion: null,
+                pendingOperator: null,
+                statusMessage: "Shortcut help.",
+              },
+            };
+          }
+          return current;
         case "return":
         case "enter":
           return {
@@ -2012,6 +2174,24 @@ function App() {
   }
 
   useKeyboard((key) => {
+    const wantsTerminalCopy =
+      key.name === "c" &&
+      (((key.meta || key.super) && !key.ctrl) || (key.ctrl && key.shift));
+    if (wantsTerminalCopy && renderer.hasSelection) {
+      const selection = renderer.getSelection();
+      const text = selection?.getSelectedText() ?? "";
+      if (text.length > 0) {
+        key.preventDefault();
+        if (renderer.isOsc52Supported()) {
+          renderer.copyToClipboardOSC52(text);
+        } else {
+          copyStringToSystemClipboard(text);
+        }
+        setState((current) => withStatus(current, "Copied selection."));
+        return;
+      }
+    }
+
     if (state.ui.helpOpen) {
       handleHelpMode(key);
       return;
@@ -2043,8 +2223,12 @@ function App() {
     [
       `mode=${state.ui.mode.toUpperCase()}`,
       `kernel=${state.kernel.status}`,
-      `provider=${state.kernel.provider}`,
+      `provider=${formatKernelProviderForStatus(state.kernel.provider, state.kernel.status)}`,
     ].join("  |  "),
+    Math.max(10, width - 4),
+  );
+  const statusShortcutsHint = truncateText(
+    getStatusHint(state.ui.mode),
     Math.max(10, width - 4),
   );
   const statusMessage = truncateText(state.ui.statusMessage, Math.max(10, width - 4));
@@ -2071,7 +2255,10 @@ function App() {
               const spinnerFrames = ["-", "\\", "|", "/"];
               const spinner = spinnerFrames[runningTick % spinnerFrames.length] ?? "-";
               const editorLines = renderEditorLines(cell.source, cell, state);
-              const tokenizedSource = tokenizeSource(cell.source);
+              const tokenizedSource =
+                cell.kind === "markdown"
+                  ? tokenizeMarkdownSource(cell.source, theme)
+                  : tokenizeSource(cell.source);
               const cursor = state.ui.cursorByCellId[cell.id] ?? defaultCursorForCell(cell);
               const cellIndex = getCellIndex(state, cell.id);
               const textSelection =
@@ -2082,8 +2269,7 @@ function App() {
                     : null;
               let runningOffset = 0;
 
-              // Markdown cells: minimal note style — black bg, gray border, compact
-              if (cell.kind === "markdown" && !(active && state.ui.mode === "insert")) {
+              if (cell.kind === "markdown" && !active) {
                 return (
                   <box
                     key={cell.id}
@@ -2091,7 +2277,7 @@ function App() {
                     flexDirection="column"
                     border
                     borderStyle="rounded"
-                    borderColor={active ? theme.muted : "#333333"}
+                    borderColor="#333333"
                     backgroundColor="#000000"
                     paddingX={1}
                     onMouseDown={(event: { button: number }) => {
@@ -2099,28 +2285,13 @@ function App() {
                       activateCell(cell.id, "editor");
                     }}
                   >
-                    {active ? (
-                      <box flexDirection="row" justifyContent="space-between">
-                        <text fg={theme.muted}>md</text>
-                        <text fg={theme.muted}>
-                          {cell.id}  [{cellIndex + 1}/{state.notebook.present.cells.length}]
-                        </text>
-                      </box>
-                    ) : null}
-                    <box id={active ? "cursor-line" : undefined} flexDirection="row" marginTop={active ? 1 : 0}>
-                      {active ? (
-                        <box width={2}>
-                          <text fg={theme.borderActive}>▌</text>
-                        </box>
-                      ) : null}
-                      <box flexGrow={1}>
-                        <markdown
-                          content={cell.source || "*empty*"}
-                          syntaxStyle={syntaxStyle}
-                          fg={theme.text}
-                          bg="#000000"
-                        />
-                      </box>
+                    <box flexGrow={1}>
+                      <markdown
+                        content={cell.source || "*empty*"}
+                        syntaxStyle={syntaxStyle}
+                        fg={theme.text}
+                        bg="#000000"
+                      />
                     </box>
                   </box>
                 );
@@ -2137,7 +2308,7 @@ function App() {
                     isRunningCell
                       ? theme.warning
                       : active
-                        ? theme.borderActive
+                        ? (cell.kind === "markdown" ? theme.accent : theme.borderActive)
                         : theme.border
                   }
                   backgroundColor={
@@ -2153,6 +2324,8 @@ function App() {
                       ? theme.selectionCell
                       : isRunningCell
                         ? "#312413"
+                      : cell.kind === "markdown"
+                        ? (active ? "#1a1e2a" : "#161a24")
                       : active
                         ? theme.panelAlt
                         : theme.panel
@@ -2177,74 +2350,72 @@ function App() {
                         </text>
                       ) : null}
                       {active && state.ui.mode === "insert" ? (
-                        <text fg="#000000" bg={theme.borderActive}>
-                          {" editing "}
+                        <text fg={theme.muted}>editing · Esc → normal</text>
+                      ) : active && state.ui.mode === "normal" ? (
+                        <text fg={theme.muted}>
+                          {cell.kind === "code"
+                            ? "i: edit · R: run · V: visual · Space d: del · u: undo"
+                            : "i: edit · V: visual · Space d: del · u: undo"}
                         </text>
+                      ) : active && (state.ui.mode === "visual" || state.ui.mode === "visual_line") ? (
+                        <text fg={theme.muted}>Esc: cancel · y: yank · d: del</text>
                       ) : null}
                       <text fg={theme.muted}>
-                        {cell.id}  [{cellIndex + 1}/{state.notebook.present.cells.length}]
+                        [{cellIndex + 1}/{state.notebook.present.cells.length}]
                       </text>
                     </box>
                   </box>
 
                   <box flexDirection="row" marginTop={1}>
-                      <box width={8} flexDirection="column">
-                        {editorLines.map((line) => (
-                          <text key={`${cell.id}-ln-${line.lineNumber}`} fg={theme.muted}>
-                            {String(line.lineNumber).padStart(3, " ")}
-                          </text>
-                        ))}
-                      </box>
+                      {cell.kind !== "markdown" ? (
+                        <box width={8} flexDirection="column">
+                          {editorLines.map((line) => (
+                            <text key={`${cell.id}-ln-${line.lineNumber}`} fg={theme.muted}>
+                              {String(line.lineNumber).padStart(3, " ")}
+                            </text>
+                          ))}
+                        </box>
+                      ) : null}
                       <box flexDirection="column" flexGrow={1}>
-                        {state.ui.mode === "normal" && !active ? (
-                          <code
-                            content={cell.source}
-                            filetype="python"
-                            syntaxStyle={syntaxStyle}
-                            bg={active ? theme.panelAlt : theme.panel}
-                            fg={theme.text}
-                          />
-                        ) : (
-                          editorLines.map((line) => (
-                            <box
-                              key={`${cell.id}-line-${line.lineNumber}`}
-                              id={
-                                active && line.isCursorLine
-                                  ? "cursor-line"
-                                  : `line-${cell.id}-${line.lineNumber}`
-                              }
-                              backgroundColor={
-                                textSelection &&
-                                runningOffset + line.text.length >= textSelection.start &&
-                                runningOffset <= textSelection.end
-                                  ? theme.selectionCell
-                                  : active &&
-                                      line.isCursorLine &&
-                                      state.ui.mode !== "visual" &&
-                                      state.ui.mode !== "visual_line" &&
-                                      state.ui.mode !== "cell_visual"
-                                    ? "#303225"
-                                    : "transparent"
-                              }
-                            >
-                              {renderActiveLine(
-                                line.text,
-                                tokenizedSource[line.lineNumber - 1],
-                                active,
-                                line.isCursorLine,
-                                cursor.col,
-                                state.ui.mode,
-                                theme,
-                                textSelection,
-                                (() => {
-                                  const start = runningOffset;
-                                  runningOffset += line.text.length + 1;
-                                  return start;
-                                })(),
-                              )}
-                            </box>
-                          ))
-                        )}
+                        {editorLines.map((line) => (
+                          <box
+                            key={`${cell.id}-line-${line.lineNumber}`}
+                            id={
+                              active && line.isCursorLine
+                                ? "cursor-line"
+                                : `line-${cell.id}-${line.lineNumber}`
+                            }
+                            backgroundColor={
+                              textSelection &&
+                              runningOffset + line.text.length >= textSelection.start &&
+                              runningOffset <= textSelection.end
+                                ? theme.selectionCell
+                                : active &&
+                                    line.isCursorLine &&
+                                    state.ui.mode !== "visual" &&
+                                    state.ui.mode !== "visual_line" &&
+                                    state.ui.mode !== "cell_visual"
+                                  ? (cell.kind === "markdown" ? "#252a38" : "#303225")
+                                  : "transparent"
+                            }
+                          >
+                            {renderActiveLine(
+                              line.text,
+                              tokenizedSource[line.lineNumber - 1],
+                              active,
+                              line.isCursorLine,
+                              cursor.col,
+                              state.ui.mode,
+                              theme,
+                              textSelection,
+                              (() => {
+                                const start = runningOffset;
+                                runningOffset += line.text.length + 1;
+                                return start;
+                              })(),
+                            )}
+                          </box>
+                        ))}
                       </box>
                     </box>
 
@@ -2317,7 +2488,7 @@ function App() {
       </scrollbox>
 
       <box
-        height={4}
+        height={statusBarHeight}
         paddingX={1}
         flexDirection="column"
         backgroundColor={theme.statusBarBg}
@@ -2325,6 +2496,7 @@ function App() {
         borderColor={theme.border}
       >
         <text fg={theme.statusBarText}>{statusSummary}</text>
+        <text fg={theme.muted}>{statusShortcutsHint}</text>
         <text fg={theme.statusBarText}>
           {state.ui.mode === "command" ? `:${state.ui.commandBuffer}` : statusMessage}
         </text>
@@ -2343,7 +2515,7 @@ function App() {
           alignItems="center"
         >
           <box
-            width={Math.min(notebookWidth, Math.max(60, width - 8))}
+            width={Math.min(width - 4, Math.max(88, notebookWidth))}
             height={Math.max(14, Math.min(bodyHeight, height - 6))}
             border
             borderStyle="rounded"
@@ -2355,7 +2527,7 @@ function App() {
           >
             <box flexDirection="row" justifyContent="space-between">
               <text fg={theme.accent}>Shortcuts</text>
-              <text fg={theme.muted}>Esc or H closes</text>
+              <text fg={theme.muted}>Esc or Shift+H closes</text>
             </box>
             <scrollbox
               ref={helpScrollRef}
@@ -2366,7 +2538,11 @@ function App() {
             >
               <box flexDirection="column">
                 {HELP_LINES.map((line, index) => (
-                  <text key={`help-${index}`} fg={line ? theme.text : theme.muted}>
+                  <text key={`help-${index}`} fg={
+                    !line ? theme.muted
+                      : !line.startsWith("  ") && line.trim().length > 0 ? theme.accent
+                      : theme.text
+                  }>
                     {line || " "}
                   </text>
                 ))}

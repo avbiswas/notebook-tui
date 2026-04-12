@@ -1,0 +1,12 @@
+.cache
+.claude
+.git
+.jj
+node_modules
+out
+test_env
+remotion/node_modules
+remotion/out
+remotion/public/timeline.json
+src/python/__pycache__
+*.tgz
