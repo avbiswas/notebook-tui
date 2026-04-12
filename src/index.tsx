@@ -1,7 +1,13 @@
-import { createCliRenderer, SyntaxStyle, type KeyEvent, type ScrollBoxRenderable } from "@opentui/core";
+import {
+  createCliRenderer,
+  decodePasteBytes,
+  SyntaxStyle,
+  type KeyEvent,
+  type ScrollBoxRenderable,
+} from "@opentui/core";
 import { createRoot, useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
 import { basename, isAbsolute, join } from "node:path";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   appendCellOutput,
   applyExecutionResult,
@@ -16,6 +22,7 @@ import {
   defaultCursorForCell,
   deleteCharAtCursor,
   deleteCurrentLine,
+  deleteFocusedCellAndRestorePrevious,
   deleteToEndOfLine,
   deleteWordBackward,
   deleteWordForward,
@@ -29,6 +36,8 @@ import {
   getVisualLineSelectionOffsets,
   getVisualSelectionOffsets,
   insertCellRelative,
+  insertLineAbove,
+  insertLineBelow,
   insertTextAtCursor,
   joinLineBelow,
   moveCursor,
@@ -53,6 +62,36 @@ import { getDisplayLines } from "./output-model";
 import { PythonSession, resolvePython } from "./python-session";
 import { themes } from "./theme";
 import type { AppState, NotebookCell, NotebookOutput } from "./types";
+
+const OUTPUT_PREVIEW_MAX_LINES = 8;
+
+const HELP_LINES = [
+  "Navigation",
+  "h j k l: move within the current cell",
+  "<Space> j / <Space> k: move to next / previous cell",
+  "<Space> vv: cell visual selection",
+  "",
+  "Editing",
+  "i / a / A: insert / append / append at end of line",
+  "o / O: insert a new line below / above in the current cell",
+  "<Space> o or <Space> B: new cell below",
+  "<Space> O or <Space> A: new cell above",
+  "dd / cc / yy / p / P / u / Ctrl-R: vim-style edits",
+  "",
+  "Execution",
+  "r or Shift+Enter: run focused cell",
+  ":r: run all cells",
+  ":clear: clear outputs",
+  "",
+  "Outputs",
+  "Down on the last source line: focus the output panel",
+  "Enter on output panel: expand full output view",
+  "Up: return from output panel to the editor",
+  "",
+  "Commands",
+  ":w / :q / :wq: save / quit / save and quit",
+  "H or Esc: close this help",
+];
 
 type ParsedArgs = {
   pythonPath?: string;
@@ -161,16 +200,278 @@ function renderImageOutput(output: Extract<NotebookOutput, { kind: "image" }>, t
   );
 }
 
+function wrapLine(line: string, maxWidth: number): string[] {
+  if (line.length <= maxWidth) return [line];
+  const wrapped: string[] = [];
+  let remaining = line;
+  while (remaining.length > 0) {
+    if (remaining.length <= maxWidth) {
+      wrapped.push(remaining);
+      break;
+    }
+    // Try to break at a word boundary
+    let breakAt = remaining.lastIndexOf(" ", maxWidth);
+    if (breakAt <= 0) {
+      // No word boundary found, break at maxWidth
+      breakAt = maxWidth;
+    }
+    wrapped.push(remaining.slice(0, breakAt));
+    remaining = remaining.slice(breakAt).replace(/^ /, "");
+  }
+  return wrapped;
+}
+
 function renderTextOutput(
   output: Extract<NotebookOutput, { kind: "stream" | "result" | "error" }>,
   keyPrefix: string,
   color: string,
+  mutedColor: string,
+  truncate = false,
+  wrapWidth = 0,
 ) {
-  return getDisplayLines(output.text).map((line, lineIndex) => (
-    <text key={`${keyPrefix}-line-${lineIndex}`} fg={color}>
-      {line.length > 0 ? line : " "}
-    </text>
-  ));
+  const rawLines = getDisplayLines(output.text);
+  const allLines = wrapWidth > 0
+    ? rawLines.flatMap((line) => wrapLine(line, wrapWidth))
+    : rawLines;
+  const lines = truncate ? allLines.slice(0, OUTPUT_PREVIEW_MAX_LINES) : allLines;
+  const hiddenCount = Math.max(0, allLines.length - lines.length);
+
+  return (
+    <>
+      {lines.map((line, lineIndex) => (
+        <text key={`${keyPrefix}-line-${lineIndex}`} fg={color}>
+          {line.length > 0 ? line : " "}
+        </text>
+      ))}
+      {hiddenCount > 0 ? (
+        <text key={`${keyPrefix}-truncated`} fg={mutedColor}>
+          {`... ${hiddenCount} more line${hiddenCount === 1 ? "" : "s"}. Press Enter to expand.`}
+        </text>
+      ) : null}
+    </>
+  );
+}
+
+function estimateOutputRows(output: NotebookOutput, truncate = true, wrapWidth = 0): number {
+  if (output.kind === "image") {
+    return output.preview?.length ? output.preview.length + 3 : 4;
+  }
+  const rawLines = getDisplayLines(output.text);
+  const lines = wrapWidth > 0
+    ? rawLines.flatMap((line) => wrapLine(line, wrapWidth))
+    : rawLines;
+  const visibleLines = truncate ? Math.min(lines.length, OUTPUT_PREVIEW_MAX_LINES) : lines.length;
+  return visibleLines + (lines.length > visibleLines ? 1 : 0);
+}
+
+function estimateEditorBlockRows(cell: NotebookCell): number {
+  const sourceLines = Math.max(1, getLines(cell.source).length);
+  return 1 + 1 + sourceLines + 4;
+}
+
+function estimateOutputBlockRows(cell: NotebookCell, wrapWidth = 0): number {
+  if (cell.outputs.length === 0) {
+    return 0;
+  }
+  let rows = 3;
+  for (const output of cell.outputs) {
+    rows += estimateOutputRows(output, true, wrapWidth);
+  }
+  return rows;
+}
+
+type NotebookBlock = {
+  cellId: string;
+  focusTarget: "editor" | "output";
+  top: number;
+  height: number;
+};
+
+function getNotebookBlocks(state: AppState, wrapWidth = 0): NotebookBlock[] {
+  const topPaddingRows = 1;
+  const gapRows = 1;
+  const blocks: NotebookBlock[] = [];
+  let top = topPaddingRows;
+
+  for (const cell of state.notebook.present.cells) {
+    const editorHeight = estimateEditorBlockRows(cell);
+    blocks.push({
+      cellId: cell.id,
+      focusTarget: "editor",
+      top,
+      height: editorHeight,
+    });
+    top += editorHeight;
+
+    if (cell.kind === "code" && cell.outputs.length > 0) {
+      const outputHeight = estimateOutputBlockRows(cell, wrapWidth);
+      blocks.push({
+        cellId: cell.id,
+        focusTarget: "output",
+        top,
+        height: outputHeight,
+      });
+      top += outputHeight;
+    }
+
+    top += gapRows;
+  }
+
+  return blocks;
+}
+
+function getFocusedBlock(state: AppState, wrapWidth = 0): NotebookBlock | null {
+  const blocks = getNotebookBlocks(state, wrapWidth);
+  return (
+    blocks.find(
+      (block) =>
+        block.cellId === state.ui.focusedCellId &&
+        block.focusTarget === state.ui.focusTarget,
+    ) ?? blocks[0] ?? null
+  );
+}
+
+// Walk the renderable tree calling updateFromLayout so the JS-side
+// _x/_y/_widthValue/_heightValue caches reflect the latest yoga-computed
+// positions. We need this because react's useLayoutEffect runs AFTER
+// reconciliation but BEFORE opentui's next render frame, which is normally
+// where these values get refreshed.
+function syncLayoutPositions(node: unknown): void {
+  if (!node || typeof node !== "object") {
+    return;
+  }
+  const renderable = node as {
+    updateFromLayout?: () => void;
+    getChildren?: () => unknown[];
+  };
+  if (typeof renderable.updateFromLayout === "function") {
+    try {
+      renderable.updateFromLayout();
+    } catch {
+      // Renderable may be in an inconsistent state (e.g. mid-destroy); ignore.
+    }
+  }
+  const children =
+    typeof renderable.getChildren === "function" ? renderable.getChildren() : [];
+  for (const child of children) {
+    syncLayoutPositions(child);
+  }
+}
+
+const SCROLL_MARGIN_ROWS = 2;
+
+// Find the renderable id we want to keep visible based on current focus.
+function getScrollTargetId(state: AppState): string | null {
+  const focusedCell = getFocusedCell(state);
+  if (!focusedCell) {
+    return null;
+  }
+  if (state.ui.focusTarget === "output" && focusedCell.outputs.length > 0) {
+    return `output-${focusedCell.id}`;
+  }
+  // Markdown cells in display modes have no per-row cursor, scroll the whole
+  // cell into view instead.
+  if (focusedCell.kind === "markdown" && state.ui.mode !== "insert") {
+    return focusedCell.id;
+  }
+  // Editor focus: target the actual cursor row line box.
+  return "cursor-line";
+}
+
+// Lazy scroll: only adjust scrollTop when the target is outside the viewport.
+// Uses real opentui-computed coordinates rather than estimated row counts so
+// it remains accurate regardless of cell wrapping, output overflow, or which
+// row the cursor sits on within a tall cell.
+function scrollFocusedIntoView(
+  scrollBox: ScrollBoxRenderable,
+  rendererRoot: { calculateLayout: () => void } & object,
+  state: AppState,
+): void {
+  const targetId = getScrollTargetId(state);
+  if (!targetId) {
+    return;
+  }
+
+  // Force yoga to recompute positions for the freshly reconciled tree, then
+  // sync those positions back to the renderable cache so child.y / viewport.y
+  // are up to date for this paint.
+  try {
+    rendererRoot.calculateLayout();
+  } catch {
+    // If layout fails for any reason, fall back to whatever stale data exists.
+  }
+  syncLayoutPositions(rendererRoot);
+
+  let target = scrollBox.content.findDescendantById(targetId) as
+    | { y: number; height: number }
+    | undefined;
+
+  // Fallback chain: if cursor-line wasn't found (e.g. rendered before id was
+  // applied), use the focused cell box.
+  if (!target) {
+    const focusedCell = getFocusedCell(state);
+    if (focusedCell) {
+      target = scrollBox.content.findDescendantById(focusedCell.id) as
+        | { y: number; height: number }
+        | undefined;
+    }
+  }
+  if (!target) {
+    return;
+  }
+
+  const viewport = scrollBox.viewport;
+  const viewportTop = viewport.y;
+  const viewportBottom = viewport.y + viewport.height;
+  const targetTop = target.y;
+  const targetBottom = target.y + target.height;
+
+  let dy = 0;
+  if (targetBottom > viewportBottom - SCROLL_MARGIN_ROWS) {
+    dy = targetBottom - (viewportBottom - SCROLL_MARGIN_ROWS);
+  } else if (targetTop < viewportTop + SCROLL_MARGIN_ROWS) {
+    dy = targetTop - (viewportTop + SCROLL_MARGIN_ROWS);
+  }
+
+  if (dy !== 0) {
+    const nextScrollTop = Math.max(0, scrollBox.scrollTop + dy);
+    if (nextScrollTop !== scrollBox.scrollTop) {
+      scrollBox.scrollTo({ x: scrollBox.scrollLeft, y: nextScrollTop });
+    }
+  }
+}
+
+function moveFocusByBlock(state: AppState, delta: number, wrapWidth = 0): AppState {
+  const blocks = getNotebookBlocks(state, wrapWidth);
+  if (blocks.length === 0) {
+    return state;
+  }
+
+  const currentIndex = blocks.findIndex(
+    (block) =>
+      block.cellId === state.ui.focusedCellId &&
+      block.focusTarget === state.ui.focusTarget,
+  );
+  const safeIndex = currentIndex >= 0 ? currentIndex : 0;
+  const nextIndex = Math.max(0, Math.min(blocks.length - 1, safeIndex + delta));
+  const nextBlock = blocks[nextIndex]!;
+
+  return {
+    ...state,
+    ui: {
+      ...state.ui,
+      focusedCellId: nextBlock.cellId,
+      lastVisitedCellId:
+        nextBlock.cellId !== state.ui.focusedCellId
+          ? state.ui.focusedCellId
+          : state.ui.lastVisitedCellId,
+      focusTarget: nextBlock.focusTarget,
+      pendingOperator: null,
+      pendingMotion: null,
+      statusMessage:
+        nextBlock.focusTarget === "output" ? "Output focused." : "Block focused.",
+    },
+  };
 }
 
 function renderActiveLine(
@@ -309,18 +610,110 @@ function App() {
   });
   const sessionRef = useRef<PythonSession | null>(null);
   const scrollRef = useRef<ScrollBoxRenderable | null>(null);
+  const helpScrollRef = useRef<ScrollBoxRenderable | null>(null);
+  const outputDialogScrollRef = useRef<ScrollBoxRenderable | null>(null);
   const theme = themes[state.ui.themeName];
   const notebookWidth = Math.min(120, Math.max(72, width - 6));
   const bodyHeight = Math.max(10, height - 4);
 
+  // Track the cursor row of the focused cell so the scroll effect re-runs on
+  // pure cursor moves (h/j/k/l, w/b, etc.) which don't otherwise touch
+  // notebook.present.
+  const focusedCursorRow =
+    state.ui.cursorByCellId[state.ui.focusedCellId]?.row ?? 0;
+  const focusedCursorCol =
+    state.ui.cursorByCellId[state.ui.focusedCellId]?.col ?? 0;
+
+  // Activate a cell via pointer input. Leaves mode untouched so that clicking
+  // while in normal/insert/command doesn't surprise the user by switching
+  // modes — we only move the focus.
+  const activateCell = (cellId: string, focusTarget: "editor" | "output") => {
+    setState((current) => {
+      if (
+        current.ui.focusedCellId === cellId &&
+        current.ui.focusTarget === focusTarget
+      ) {
+        return current;
+      }
+      return {
+        ...current,
+        ui: {
+          ...current.ui,
+          focusedCellId: cellId,
+          lastVisitedCellId:
+            current.ui.focusedCellId !== cellId
+              ? current.ui.focusedCellId
+              : current.ui.lastVisitedCellId,
+          focusTarget,
+          pendingOperator: null,
+          pendingMotion: null,
+          statusMessage:
+            focusTarget === "output" ? "Output focused." : "Cell focused.",
+        },
+      };
+    });
+  };
+
   useEffect(() => () => syntaxStyle.destroy(), [syntaxStyle]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const sb = scrollRef.current;
-    if (sb) {
-      sb.scrollChildIntoView(state.ui.focusedCellId);
+    if (!sb) {
+      return;
     }
-  }, [state.ui.focusedCellId, state.notebook.present]);
+    scrollFocusedIntoView(sb, renderer.root, state);
+  }, [
+    renderer,
+    bodyHeight,
+    notebookWidth,
+    state.notebook.present,
+    state.ui.focusedCellId,
+    state.ui.focusTarget,
+    state.ui.mode,
+    focusedCursorRow,
+    focusedCursorCol,
+  ]);
+
+  useEffect(() => {
+    const keyInput = renderer.keyInput;
+    const onPaste = (event: { bytes: Uint8Array; preventDefault(): void }) => {
+      const text = decodePasteBytes(event.bytes);
+      if (!text) {
+        return;
+      }
+      event.preventDefault();
+      setState((current) => {
+        if (current.ui.helpOpen || current.ui.outputDialogCellId) {
+          return current;
+        }
+        if (current.ui.mode === "command") {
+          return {
+            ...current,
+            ui: {
+              ...current.ui,
+              commandBuffer: `${current.ui.commandBuffer}${text}`,
+              statusMessage: "Pasted into command buffer.",
+            },
+          };
+        }
+        const inserted = insertTextAtCursor(current, text);
+        return {
+          ...inserted,
+          ui: {
+            ...inserted.ui,
+            mode: "insert",
+            focusTarget: "editor",
+            statusMessage: "Pasted.",
+          },
+        };
+      });
+    };
+
+    keyInput.on("paste", onPaste);
+    return () => {
+      keyInput.off("paste", onPaste);
+    };
+  }, [renderer]);
 
   useEffect(() => {
     if (!args.notebookPath) {
@@ -480,7 +873,18 @@ function App() {
           const cellSource = cells[i]!.source;
           const result = await executeNotebookCell(session, cellSource, (event) => {
             if (event.type === "output") {
-              setState((current) => appendCellOutput(current, cellId, event.output));
+              setState((current) => {
+                const next = appendCellOutput(current, cellId, event.output);
+                return {
+                  ...next,
+                  ui: {
+                    ...next.ui,
+                    focusedCellId: cellId,
+                    focusTarget: "output",
+                    statusMessage: "Output focused.",
+                  },
+                };
+              });
             }
           });
           setState((current) => ({
@@ -543,7 +947,18 @@ function App() {
       const cellId = focusedCell.id;
       const result = await executeNotebookCell(session, focusedCell.source, (event) => {
         if (event.type === "output") {
-          setState((current) => appendCellOutput(current, cellId, event.output));
+          setState((current) => {
+            const next = appendCellOutput(current, cellId, event.output);
+            return {
+              ...next,
+              ui: {
+                ...next.ui,
+                focusedCellId: cellId,
+                focusTarget: "output",
+                statusMessage: "Output focused.",
+              },
+            };
+          });
         }
       });
       setState((current) => ({
@@ -624,7 +1039,18 @@ function App() {
       try {
         const result = await executeNotebookCell(session, currentCell.source, (event) => {
           if (event.type === "output") {
-            setState((current) => appendCellOutput(current, cellId, event.output));
+            setState((current) => {
+              const next = appendCellOutput(current, cellId, event.output);
+              return {
+                ...next,
+                ui: {
+                  ...next.ui,
+                  focusedCellId: cellId,
+                  focusTarget: "output",
+                  statusMessage: "Output focused.",
+                },
+              };
+            });
           }
         });
         setState((current) => ({
@@ -765,6 +1191,14 @@ function App() {
     }));
   }
 
+  function scrollRenderable(ref: { current: ScrollBoxRenderable | null }, delta: number) {
+    const renderable = ref.current;
+    if (!renderable) {
+      return;
+    }
+    renderable.scrollTo({ x: renderable.scrollLeft, y: Math.max(0, renderable.scrollTop + delta) });
+  }
+
   function handleNormalMode(key: KeyEvent) {
     if (key.shift && key.name === "enter") {
       void runFocusedCell();
@@ -777,12 +1211,70 @@ function App() {
         return current;
       }
 
+      if (key.shift && key.name === "h") {
+        return {
+          ...current,
+          ui: {
+            ...current.ui,
+            helpOpen: true,
+            outputDialogCellId: null,
+            statusMessage: "Shortcut help.",
+          },
+        };
+      }
+
       if (key.meta && key.name === "z") {
         return undoNotebook(current);
       }
 
       if (key.ctrl && key.name === "r") {
         return redoNotebook(current);
+      }
+
+      if (current.ui.focusTarget === "output") {
+        switch (key.name) {
+          case "escape":
+            return withStatus(
+              {
+                ...current,
+                ui: { ...current.ui, focusTarget: "editor" },
+              },
+              "Returned to editor.",
+            );
+          case "i":
+            // Transfer focus back to the code cell attached to this output
+            // and drop straight into insert mode — the output box itself is
+            // read-only so staying focused there would be a dead end.
+            return {
+              ...current,
+              ui: {
+                ...current.ui,
+                focusTarget: "editor",
+                mode: "insert",
+                pendingOperator: null,
+                pendingMotion: null,
+                statusMessage: "Insert mode.",
+              },
+            };
+          case "down":
+          case "j":
+            return moveFocusByBlock(current, 1);
+          case "up":
+          case "k":
+            return moveFocusByBlock(current, -1);
+          case "return":
+          case "enter":
+            return {
+              ...current,
+              ui: {
+                ...current.ui,
+                outputDialogCellId: current.ui.focusedCellId,
+                statusMessage: "Expanded output view.",
+              },
+            };
+          default:
+            return current;
+        }
       }
 
       switch (key.name) {
@@ -816,7 +1308,12 @@ function App() {
             const moved = moveCursorToFirstNonWhitespace(current);
             return {
               ...moved,
-              ui: { ...moved.ui, mode: "insert", statusMessage: "Insert mode." },
+              ui: {
+                ...moved.ui,
+                mode: "insert",
+                focusTarget: "editor",
+                statusMessage: "Insert mode.",
+              },
             };
           }
           return {
@@ -824,12 +1321,24 @@ function App() {
             ui: {
               ...current.ui,
               mode: "insert",
+              focusTarget: "editor",
               pendingOperator: null,
               pendingMotion: null,
               statusMessage: "Insert mode.",
             },
           };
         case "a": {
+          if (current.ui.pendingMotion === "leader" && key.shift) {
+            const inserted = insertCellRelative(current, 0);
+            return {
+              ...inserted,
+              ui: {
+                ...inserted.ui,
+                pendingMotion: null,
+                statusMessage: "Inserted a new cell above.",
+              },
+            };
+          }
           if (key.shift) {
             const moved = moveCursorToLineBoundary(current, "end");
             return {
@@ -927,13 +1436,19 @@ function App() {
           return moveCursor(current, 0, 1);
         case "up":
         case "k":
-          return moveCursor(current, -1, 0);
+          if (current.ui.pendingMotion === "leader") {
+            return moveFocusToRelativeCell(current, -1);
+          }
+          return moveFocusByBlock(current, -1);
         case "down":
         case "j":
+          if (current.ui.pendingMotion === "leader") {
+            return moveFocusToRelativeCell(current, 1);
+          }
           if (key.shift) {
             return joinLineBelow(current);
           }
-          return moveCursor(current, 1, 0);
+          return moveFocusByBlock(current, 1);
         case "0":
           return moveCursorToLineBoundary(current, "start");
         case "home":
@@ -951,9 +1466,47 @@ function App() {
           return moveFocusToRelativeCell(current, 1);
         case "o":
           if (key.shift) {
-            return insertCellRelative(current, 0);
+            if (current.ui.pendingMotion === "leader") {
+              const inserted = insertCellRelative(current, 0);
+              return {
+                ...inserted,
+                ui: {
+                  ...inserted.ui,
+                  pendingMotion: null,
+                  statusMessage: "Inserted a new cell above.",
+                },
+              };
+            }
+            const inserted = insertLineAbove(current);
+            return {
+              ...inserted,
+              ui: {
+                ...inserted.ui,
+                mode: "insert",
+                statusMessage: "Insert mode.",
+              },
+            };
           }
-          return insertCellRelative(current, 1);
+          if (current.ui.pendingMotion === "leader") {
+            const inserted = insertCellRelative(current, 1);
+            return {
+              ...inserted,
+              ui: {
+                ...inserted.ui,
+                pendingMotion: null,
+                statusMessage: "Inserted a new cell below.",
+              },
+            };
+          }
+          const inserted = insertLineBelow(current);
+          return {
+            ...inserted,
+            ui: {
+              ...inserted.ui,
+              mode: "insert",
+              statusMessage: "Insert mode.",
+            },
+          };
         case "m":
           if (key.shift) {
             return toggleCellKind(current);
@@ -961,7 +1514,18 @@ function App() {
           return current;
         case "b":
           if (key.shift) {
-            return insertCellRelative(current, 1);
+            if (current.ui.pendingMotion === "leader") {
+              const inserted = insertCellRelative(current, 1);
+              return {
+                ...inserted,
+                ui: {
+                  ...inserted.ui,
+                  pendingMotion: null,
+                  statusMessage: "Inserted a new cell below.",
+                },
+              };
+            }
+            return moveCursorByWord(current, "backward");
           }
           if (current.ui.pendingOperator === "delete") {
             return deleteWordForward(current);
@@ -998,6 +1562,9 @@ function App() {
         case "e":
           return moveCursorByWord(current, "end");
         case "d":
+          if (current.ui.pendingMotion === "leader") {
+            return deleteFocusedCellAndRestorePrevious(current);
+          }
           if (key.shift) {
             return deleteToEndOfLine(current);
           }
@@ -1244,6 +1811,66 @@ function App() {
     }
   }
 
+  function handleHelpMode(key: KeyEvent) {
+    if (key.name === "escape" || (key.shift && key.name === "h")) {
+      setState((current) => ({
+        ...current,
+        ui: {
+          ...current.ui,
+          helpOpen: false,
+          statusMessage: "Normal mode.",
+        },
+      }));
+      return;
+    }
+
+    if (key.name === "up" || key.name === "k") {
+      scrollRenderable(helpScrollRef, -1);
+      return;
+    }
+    if (key.name === "down" || key.name === "j") {
+      scrollRenderable(helpScrollRef, 1);
+      return;
+    }
+    if (key.name === "pageup") {
+      scrollRenderable(helpScrollRef, -Math.max(4, Math.floor(bodyHeight / 2)));
+      return;
+    }
+    if (key.name === "pagedown") {
+      scrollRenderable(helpScrollRef, Math.max(4, Math.floor(bodyHeight / 2)));
+    }
+  }
+
+  function handleOutputDialogMode(key: KeyEvent) {
+    if (key.name === "escape" || key.name === "q" || key.name === "return" || key.name === "enter") {
+      setState((current) => ({
+        ...current,
+        ui: {
+          ...current.ui,
+          outputDialogCellId: null,
+          statusMessage: "Collapsed output view.",
+        },
+      }));
+      return;
+    }
+
+    if (key.name === "up" || key.name === "k") {
+      scrollRenderable(outputDialogScrollRef, -1);
+      return;
+    }
+    if (key.name === "down" || key.name === "j") {
+      scrollRenderable(outputDialogScrollRef, 1);
+      return;
+    }
+    if (key.name === "pageup") {
+      scrollRenderable(outputDialogScrollRef, -Math.max(4, Math.floor(bodyHeight / 2)));
+      return;
+    }
+    if (key.name === "pagedown") {
+      scrollRenderable(outputDialogScrollRef, Math.max(4, Math.floor(bodyHeight / 2)));
+    }
+  }
+
   function handleVisualMode(key: KeyEvent) {
     setState((current) => {
       if (key.name === "escape") {
@@ -1338,6 +1965,14 @@ function App() {
   }
 
   useKeyboard((key) => {
+    if (state.ui.helpOpen) {
+      handleHelpMode(key);
+      return;
+    }
+    if (state.ui.outputDialogCellId) {
+      handleOutputDialogMode(key);
+      return;
+    }
     if (state.ui.mode === "insert") {
       handleInsertMode(key);
       return;
@@ -1408,6 +2043,10 @@ function App() {
                     borderColor={active ? theme.muted : "#333333"}
                     backgroundColor="#000000"
                     paddingX={1}
+                    onMouseDown={(event: { button: number }) => {
+                      if (event.button !== 0) return;
+                      activateCell(cell.id, "editor");
+                    }}
                   >
                     {active ? (
                       <box flexDirection="row" justifyContent="space-between">
@@ -1452,6 +2091,10 @@ function App() {
                   }
                   paddingX={1}
                   paddingY={1}
+                  onMouseDown={(event: { button: number }) => {
+                    if (event.button !== 0) return;
+                    activateCell(cell.id, "editor");
+                  }}
                 >
                   <box flexDirection="row" justifyContent="space-between">
                     <text fg={active ? theme.accent : theme.muted}>
@@ -1490,6 +2133,11 @@ function App() {
                           editorLines.map((line) => (
                             <box
                               key={`${cell.id}-line-${line.lineNumber}`}
+                              id={
+                                active && line.isCursorLine
+                                  ? "cursor-line"
+                                  : `line-${cell.id}-${line.lineNumber}`
+                              }
                               backgroundColor={
                                 textSelection &&
                                 runningOffset + line.text.length >= textSelection.start &&
@@ -1526,15 +2174,42 @@ function App() {
 
                   {cell.kind === "code" && cell.outputs.length > 0 ? (
                     <box
+                      id={`output-${cell.id}`}
                       flexDirection="column"
                       marginTop={1}
-                      paddingLeft={1}
-                      border={["left"]}
-                      borderColor={theme.border}
+                      paddingX={1}
+                      paddingY={1}
+                      border
+                      borderStyle="rounded"
+                      borderColor={
+                        active && state.ui.focusTarget === "output"
+                          ? theme.borderActive
+                          : theme.border
+                      }
+                      backgroundColor={
+                        active && state.ui.focusTarget === "output"
+                          ? theme.panelAlt
+                          : theme.background
+                      }
+                      onMouseDown={(event: {
+                        button: number;
+                        stopPropagation: () => void;
+                      }) => {
+                        if (event.button !== 0) return;
+                        event.stopPropagation();
+                        activateCell(cell.id, "output");
+                      }}
                     >
-                      <text fg={theme.muted}>
-                        {`Out: ${cell.outputs.map((output) => output.kind).join(", ")}`}
-                      </text>
+                      <box flexDirection="row" justifyContent="space-between">
+                        <text fg={theme.muted}>
+                          {`Out: ${cell.outputs.map((output) => output.kind).join(", ")}`}
+                        </text>
+                        <text fg={active && state.ui.focusTarget === "output" ? theme.accent : theme.muted}>
+                          {active && state.ui.focusTarget === "output"
+                            ? "Enter expands"
+                            : "Down focuses"}
+                        </text>
+                      </box>
                       {cell.outputs.map((output, index) =>
                         output.kind === "image" ? (
                           <box key={`${cell.id}-output-${index}`} flexDirection="column">
@@ -1553,6 +2228,9 @@ function App() {
                                 : output.kind === "result"
                                   ? theme.success
                                   : theme.text,
+                              theme.muted,
+                              true,
+                              notebookWidth - 4,
                             )}
                           </box>
                         ),
@@ -1562,6 +2240,11 @@ function App() {
                 </box>
               );
             })}
+            {/* Tail padding: match the viewport height so that even the very
+                last line of the very last cell can be scrolled all the way to
+                the top of the viewport. This also gives the mouse wheel
+                somewhere to go past the natural content end. */}
+            <box height={Math.max(bodyHeight - 2, 4)} flexShrink={0} />
           </box>
         </box>
       </scrollbox>
@@ -1579,6 +2262,123 @@ function App() {
           {state.ui.mode === "command" ? `:${state.ui.commandBuffer}` : statusMessage}
         </text>
       </box>
+
+      {state.ui.helpOpen ? (
+        <box
+          position="absolute"
+          top={0}
+          left={0}
+          width="100%"
+          height="100%"
+          zIndex={20}
+          backgroundColor={theme.background}
+          justifyContent="center"
+          alignItems="center"
+        >
+          <box
+            width={Math.min(notebookWidth, Math.max(60, width - 8))}
+            height={Math.max(14, Math.min(bodyHeight, height - 6))}
+            border
+            borderStyle="rounded"
+            borderColor={theme.borderActive}
+            backgroundColor={theme.panel}
+            flexDirection="column"
+            paddingX={1}
+            paddingY={1}
+          >
+            <box flexDirection="row" justifyContent="space-between">
+              <text fg={theme.accent}>Shortcuts</text>
+              <text fg={theme.muted}>Esc or H closes</text>
+            </box>
+            <scrollbox
+              ref={helpScrollRef}
+              focused
+              flexGrow={1}
+              marginTop={1}
+              style={{ rootOptions: { backgroundColor: theme.panel } }}
+            >
+              <box flexDirection="column">
+                {HELP_LINES.map((line, index) => (
+                  <text key={`help-${index}`} fg={line ? theme.text : theme.muted}>
+                    {line || " "}
+                  </text>
+                ))}
+              </box>
+            </scrollbox>
+          </box>
+        </box>
+      ) : null}
+
+      {state.ui.outputDialogCellId ? (
+        <box
+          position="absolute"
+          top={0}
+          left={0}
+          width="100%"
+          height="100%"
+          zIndex={30}
+          backgroundColor={theme.background}
+          justifyContent="center"
+          alignItems="center"
+        >
+          <box
+            width={Math.min(notebookWidth + 8, Math.max(70, width - 6))}
+            height={Math.max(14, Math.min(height - 4, bodyHeight + 2))}
+            border
+            borderStyle="rounded"
+            borderColor={theme.borderActive}
+            backgroundColor={theme.panel}
+            flexDirection="column"
+            paddingX={1}
+            paddingY={1}
+          >
+            <box flexDirection="row" justifyContent="space-between">
+              <text fg={theme.accent}>{`${state.ui.outputDialogCellId} output`}</text>
+              <text fg={theme.muted}>Esc, Enter, or q closes</text>
+            </box>
+            <scrollbox
+              ref={outputDialogScrollRef}
+              focused
+              flexGrow={1}
+              marginTop={1}
+              style={{ rootOptions: { backgroundColor: theme.panel } }}
+            >
+              <box flexDirection="column" gap={1}>
+                {(state.notebook.present.cells.find((cell) => cell.id === state.ui.outputDialogCellId)?.outputs ?? []).map((output, index) =>
+                  output.kind === "image" ? (
+                    <box key={`dialog-output-${index}`} flexDirection="column">
+                      {renderImageOutput(output, theme)}
+                    </box>
+                  ) : (
+                    <box
+                      key={`dialog-output-${index}`}
+                      flexDirection="column"
+                      border
+                      borderStyle="rounded"
+                      borderColor={theme.border}
+                      paddingX={1}
+                      paddingY={1}
+                    >
+                      {renderTextOutput(
+                        output,
+                        `dialog-output-${index}`,
+                        output.kind === "error"
+                          ? theme.error
+                          : output.kind === "result"
+                            ? theme.success
+                            : theme.text,
+                        theme.muted,
+                        false,
+                        Math.min(notebookWidth + 8, Math.max(70, width - 6)) - 8,
+                      )}
+                    </box>
+                  ),
+                )}
+              </box>
+            </scrollbox>
+          </box>
+        </box>
+      ) : null}
     </box>
   );
 }
@@ -1586,6 +2386,6 @@ function App() {
 export { App };
 
 if (import.meta.main) {
-  const renderer = await createCliRenderer({ exitOnCtrlC: false, useMouse: false });
+  const renderer = await createCliRenderer({ exitOnCtrlC: false, useMouse: true });
   createRoot(renderer).render(<App />);
 }

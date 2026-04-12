@@ -11,17 +11,7 @@ import { existsSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 
 const TEMPLATE = `# notebook-tui render template
-# Run with: ntui render
-
-# ─── Input ───────────────────────────────────────────────────────────
-
-# Path to the .ipynb notebook file (required)
-notebook: notebook.ipynb
-
-# ─── Output ──────────────────────────────────────────────────────────
-
-# Output video file path
-output: out/video.mp4
+# Usage: ntui render notebook.ipynb -o out.mp4 --template template.yaml
 
 # ─── Animation ───────────────────────────────────────────────────────
 
@@ -53,6 +43,11 @@ aspect: horizontal
 # width: 1920
 # height: 1080
 
+# ─── Font ────────────────────────────────────────────────────────────
+
+# Base font size in pixels (default: 16)
+# fontSize: 16
+
 # ─── Python ──────────────────────────────────────────────────────────
 
 # Python interpreter path (auto-detected if omitted)
@@ -81,7 +76,7 @@ function main() {
 
   Bun.write(outputPath, TEMPLATE);
   console.log(`  Created render template: ${outputPath}`);
-  console.log(`  Edit the file, then run: ntui render`);
+  console.log(`  Edit the file, then run: ntui render notebook.ipynb --template ${outputPath}`);
 }
 
 main();

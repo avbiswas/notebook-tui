@@ -7,7 +7,7 @@ import {
   useVideoConfig,
 } from "remotion";
 import { monokai } from "./theme";
-import { SyntaxLine } from "./SyntaxLine";
+import { SyntaxLine, useTokenizedSource } from "./SyntaxLine";
 import type { CellState, AnimationMode } from "./types";
 
 /**
@@ -60,7 +60,8 @@ export function buildTypingSchedule(source: string, fps: number): number[] {
 const CellOutput: React.FC<{
   output: CellState["outputs"][number];
   scale: number;
-}> = ({ output, scale: s }) => {
+  fontSize: number;
+}> = ({ output, scale: s, fontSize }) => {
   if (output.kind === "image" && output.data) {
     return (
       <div
@@ -72,7 +73,7 @@ const CellOutput: React.FC<{
           background: monokai.panelAlt,
         }}
       >
-        <div style={{ color: monokai.muted, fontSize: 13 * s, marginBottom: 4 * s }}>
+        <div style={{ color: monokai.muted, fontSize: (fontSize - 3) * s, marginBottom: 4 * s }}>
           {output.mimeType}
           {output.width > 0 ? ` (${output.width}x${output.height})` : ""}
         </div>
@@ -133,8 +134,11 @@ const CellOutput: React.FC<{
     <div
       style={{
         color,
-        fontSize: 16 * s,
-        lineHeight: `${24 * s}px`,
+        fontSize: fontSize * s,
+        lineHeight: `${Math.round(fontSize * 1.5) * s}px`,
+        wordWrap: "break-word",
+        overflowWrap: "break-word",
+        whiteSpace: "pre-wrap",
       }}
     >
       {lines.map((line, index) => (
@@ -151,16 +155,22 @@ export const Cell: React.FC<{
   index: number;
   total: number;
   focusFrame: number;
+  typingFrame?: number;
   outputFrame: number | null;
   animationMode?: AnimationMode;
   scale?: number;
-}> = ({ cell, index, total, focusFrame, outputFrame, animationMode = "char", scale: s = 1 }) => {
+  fontSize?: number;
+  collapsed?: boolean;
+}> = ({ cell, index, total, focusFrame, typingFrame, outputFrame, animationMode = "char", scale: s = 1, fontSize = 16, collapsed = false }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
   const hasFocused = focusFrame >= 0;
+  // Typing starts after scroll settles (typingFrame), not when focus begins (focusFrame)
+  const typeStart = typingFrame ?? focusFrame;
   const lines = cell.source.split("\n");
   const totalChars = cell.source.length;
+  const tokenizedLines = useTokenizedSource(cell.source);
 
   // Build typing schedule once (deterministic, memoized by source)
   const typingSchedule = useMemo(
@@ -192,19 +202,19 @@ export const Cell: React.FC<{
     revealedLines = [""];
     visibleLineCount = 1;
   } else if (animationMode === "present" || animationMode === "block") {
-    const visible = animationMode === "present" || frame >= focusFrame;
+    const visible = animationMode === "present" || frame >= typeStart;
     revealedLines = visible ? lines : [""];
     visibleLineCount = visible ? lines.length : 1;
   } else if (animationMode === "line") {
     const linesPerSecond = 6.67;
-    const framesElapsed = Math.max(0, frame - focusFrame);
+    const framesElapsed = Math.max(0, frame - typeStart);
     const revealedCount = Math.min(lines.length, Math.floor((framesElapsed / fps) * linesPerSecond) + 1);
     revealedLines = lines.map((line, i) => (i < revealedCount ? line : ""));
     visibleLineCount = revealedCount;
     showCursor = revealedCount < lines.length;
   } else if (animationMode === "word") {
     const wordsPerSecond = 8;
-    const framesElapsed = Math.max(0, frame - focusFrame);
+    const framesElapsed = Math.max(0, frame - typeStart);
     const revealedWordCount = Math.floor((framesElapsed / fps) * wordsPerSecond);
 
     const words = cell.source.match(/\S+/g) || [];
@@ -227,7 +237,7 @@ export const Cell: React.FC<{
     }
   } else {
     // char by char with natural typing rhythm
-    const framesElapsed = Math.max(0, frame - focusFrame);
+    const framesElapsed = Math.max(0, frame - typeStart);
     // Binary search the schedule to find how many chars are revealed at this frame
     let lo = 0, hi = typingSchedule.length;
     while (lo < hi) {
@@ -261,6 +271,55 @@ export const Cell: React.FC<{
   const outputOpacity = interpolate(outputEntrance, [0, 1], [0, 1]);
   const outputTranslateY = interpolate(outputEntrance, [0, 1], [8, 0]);
 
+  // --- Collapsed view: compact single-line summary ---
+  if (collapsed) {
+    const firstLine = lines[0] || "";
+    const lineCount = lines.length;
+    const outputCount = cell.outputs.length;
+    const collapsedTokens = (tokenizedLines[0] || []);
+
+    return (
+      <div
+        style={{
+          border: `${2 * s}px solid ${monokai.border}`,
+          borderRadius: 8 * s,
+          background: monokai.panel,
+          padding: `${8 * s}px ${16 * s}px`,
+          marginBottom: 10 * s,
+          opacity: 0.6,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 12 * s }}>
+          <span style={{ color: monokai.muted, fontSize: (fontSize - 1) * s, flexShrink: 0 }}>
+            In [{cell.executionCount ?? " "}]:
+          </span>
+          <span
+            style={{
+              flex: 1,
+              fontSize: (fontSize + 1) * s,
+              lineHeight: `${Math.round(fontSize * 1.625) * s}px`,
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
+          >
+            <SyntaxLine tokens={collapsedTokens} />
+          </span>
+          {lineCount > 1 && (
+            <span style={{ color: monokai.muted, fontSize: (fontSize - 2) * s, flexShrink: 0 }}>
+              +{lineCount - 1} lines
+            </span>
+          )}
+          {outputCount > 0 && (
+            <span style={{ color: monokai.success, fontSize: (fontSize - 2) * s, flexShrink: 0 }}>
+              ✓
+            </span>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       style={{
@@ -281,10 +340,10 @@ export const Cell: React.FC<{
           marginBottom: 8 * s,
         }}
       >
-        <span style={{ color: showRunning ? monokai.warning : cell.focused ? monokai.accent : monokai.muted, fontSize: 15 * s }}>
+        <span style={{ color: showRunning ? monokai.warning : cell.focused ? monokai.accent : monokai.muted, fontSize: (fontSize - 1) * s }}>
           In [{showRunning ? spinnerChar : (cell.executionCount ?? " ")}]:
         </span>
-        <span style={{ color: monokai.muted, fontSize: 15 * s }}>
+        <span style={{ color: monokai.muted, fontSize: (fontSize - 1) * s }}>
           cell-{index + 1} [{index + 1}/{total}]
         </span>
       </div>
@@ -297,27 +356,42 @@ export const Cell: React.FC<{
             textAlign: "right",
             minWidth: 24 * s,
             userSelect: "none",
-            fontSize: 17 * s,
-            lineHeight: `${26 * s}px`,
+            fontSize: (fontSize + 1) * s,
+            lineHeight: `${Math.round(fontSize * 1.625) * s}px`,
           }}
         >
           {revealedLines.slice(0, visibleLineCount).map((_, i) => (
             <div key={i}>{i + 1}</div>
           ))}
         </div>
-        <div style={{ flex: 1, fontSize: 17 * s, lineHeight: `${26 * s}px`, whiteSpace: "pre" }}>
-          {revealedLines.slice(0, visibleLineCount).map((line, i) => (
+        <div style={{ flex: 1, fontSize: (fontSize + 1) * s, lineHeight: `${Math.round(fontSize * 1.625) * s}px`, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+          {revealedLines.slice(0, visibleLineCount).map((line, i) => {
+            // Clip tokenized tokens to match the revealed character count for this line
+            const fullTokens = tokenizedLines[i] || [];
+            let remaining = line.length;
+            const clippedTokens: { text: string; color: string }[] = [];
+            for (const tok of fullTokens) {
+              if (remaining <= 0) break;
+              if (tok.text.length <= remaining) {
+                clippedTokens.push(tok);
+                remaining -= tok.text.length;
+              } else {
+                clippedTokens.push({ text: tok.text.slice(0, remaining), color: tok.color });
+                remaining = 0;
+              }
+            }
+            return (
             <div key={i}>
-              <SyntaxLine line={line} />
+              <SyntaxLine tokens={clippedTokens} />
               {cursorVisible && i === visibleLineCount - 1 && (
                 <span
                   style={{
                     background: monokai.borderActive,
                     color: "#000",
                     width: 10 * s,
-                    height: `${20 * s}px`,
+                    height: `${(fontSize + 1) * s}px`,
                     display: "inline-block",
-                    verticalAlign: "bottom",
+                    verticalAlign: "baseline",
                     marginLeft: 1 * s,
                   }}
                 >
@@ -325,7 +399,8 @@ export const Cell: React.FC<{
                 </span>
               )}
             </div>
-          ))}
+            );
+          })}
         </div>
       </div>
 
@@ -340,11 +415,11 @@ export const Cell: React.FC<{
             transform: `translateY(${outputTranslateY}px)`,
           }}
         >
-          <div style={{ color: monokai.muted, fontSize: 12 * s, marginBottom: 4 * s }}>
+          <div style={{ color: monokai.muted, fontSize: (fontSize - 4) * s, marginBottom: 4 * s }}>
             Out [{cell.executionCount ?? " "}]:
           </div>
           {cell.outputs.map((output, i) => (
-            <CellOutput key={i} output={output} scale={s} />
+            <CellOutput key={i} output={output} scale={s} fontSize={fontSize} />
           ))}
         </div>
       )}

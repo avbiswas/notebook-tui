@@ -83,13 +83,12 @@ type RenderConfig = {
   height: number;
   quality?: Quality;
   aspect?: Aspect;
+  fontSize?: number;
 };
 
 // ── YAML template ──────────────────────────────────────────────────
 
 type TemplateYaml = {
-  notebook?: string;
-  output?: string;
   animation?: string;
   force?: boolean;
   python?: string;
@@ -99,6 +98,7 @@ type TemplateYaml = {
   height?: number;
   quality?: string;
   aspect?: string;
+  fontSize?: number;
 };
 
 function loadTemplate(templatePath: string): Partial<RenderConfig> {
@@ -111,8 +111,6 @@ function loadTemplate(templatePath: string): Partial<RenderConfig> {
 
   const config: Partial<RenderConfig> = {};
 
-  if (yaml.notebook) config.notebookPath = resolvePath(yaml.notebook);
-  if (yaml.output) config.outputPath = resolvePath(yaml.output);
   if (yaml.animation && ANIMATION_MODES.includes(yaml.animation as AnimationMode)) {
     config.animationMode = yaml.animation as AnimationMode;
   }
@@ -124,6 +122,7 @@ function loadTemplate(templatePath: string): Partial<RenderConfig> {
   if (yaml.height) config.height = yaml.height;
   if (yaml.quality) config.quality = yaml.quality as Quality;
   if (yaml.aspect) config.aspect = yaml.aspect as Aspect;
+  if (yaml.fontSize) config.fontSize = yaml.fontSize;
 
   return config;
 }
@@ -132,12 +131,13 @@ function loadTemplate(templatePath: string): Partial<RenderConfig> {
 
 function usage(): never {
   console.error(`Usage:
-  ntui render [render.yaml]              Render from template
-  ntui render <notebook.ipynb> [opts]    Render with CLI args
+  ntui render <notebook.ipynb> [opts]    Render notebook to video
 
 Options:
   -o, --output <path>        Output video path (default: out/video.mp4)
+  --template <path>          Load render settings from YAML template
   --animation <mode>         char | word | line | block | present (default: char)
+  --font-size <n>            Base font size in px (default: 16)
   --force, -f                Re-execute notebook (ignore cache)
   --python <path>            Python interpreter path
   --venv <path>              Virtual environment path
@@ -157,19 +157,27 @@ Custom resolution (overrides presets):
   --fps <n>                  Frames per second (default: 30)
 
 Template:
-  ntui init                  Create a render.yaml template`);
+  ntui init                  Create a render.yaml template
+
+Examples:
+  ntui render notebook.ipynb
+  ntui render notebook.ipynb -o out.mp4 --template template.yaml
+  ntui render notebook.ipynb --animation line --font-size 18`);
   process.exit(1);
 }
 
 function parseCliArgs(argv: string[]): { templatePath?: string; overrides: Partial<RenderConfig> } {
   const overrides: Partial<RenderConfig> = {};
-  let positional: string | undefined;
+  let templatePath: string | undefined;
 
   for (let i = 0; i < argv.length; i++) {
     const v = argv[i]!;
     if (v === "-o" || v === "--output") {
       const val = argv[++i];
       if (val) overrides.outputPath = isAbsolute(val) ? val : join(process.cwd(), val);
+    } else if (v === "--template" || v === "-t") {
+      const val = argv[++i];
+      if (val) templatePath = isAbsolute(val) ? val : join(process.cwd(), val);
     } else if (v === "--animation" || v === "--anim") {
       const mode = argv[++i] as AnimationMode;
       if (ANIMATION_MODES.includes(mode)) {
@@ -178,6 +186,8 @@ function parseCliArgs(argv: string[]): { templatePath?: string; overrides: Parti
         console.error(`Invalid animation mode: ${mode}`);
         usage();
       }
+    } else if (v === "--font-size") {
+      overrides.fontSize = parseInt(argv[++i] ?? "16", 10);
     } else if (v === "--force" || v === "-f") {
       overrides.force = true;
     } else if (v === "--python") {
@@ -197,32 +207,12 @@ function parseCliArgs(argv: string[]): { templatePath?: string; overrides: Parti
       overrides.height = parseInt(argv[++i] ?? "1080", 10);
     } else if (v === "-h" || v === "--help") {
       usage();
-    } else if (!v.startsWith("-") && !positional) {
-      positional = isAbsolute(v) ? v : join(process.cwd(), v);
+    } else if (!v.startsWith("-") && !overrides.notebookPath) {
+      overrides.notebookPath = isAbsolute(v) ? v : join(process.cwd(), v);
     }
   }
 
-  if (positional) {
-    if (positional.endsWith(".yaml") || positional.endsWith(".yml")) {
-      return { templatePath: positional, overrides };
-    }
-    if (positional.endsWith(".ipynb")) {
-      overrides.notebookPath = positional;
-      return { overrides };
-    }
-    if (existsSync(positional)) {
-      const content = require("node:fs").readFileSync(positional, "utf-8") as string;
-      if (content.trimStart().startsWith("{")) {
-        overrides.notebookPath = positional;
-      } else {
-        return { templatePath: positional, overrides };
-      }
-    } else {
-      overrides.notebookPath = positional;
-    }
-  }
-
-  return { overrides };
+  return { templatePath, overrides };
 }
 
 function resolveConfig(templateConfig: Partial<RenderConfig>, cliOverrides: Partial<RenderConfig>): RenderConfig {
@@ -247,6 +237,7 @@ function resolveConfig(templateConfig: Partial<RenderConfig>, cliOverrides: Part
     height: h,
     quality: merged.quality,
     aspect: merged.aspect,
+    fontSize: merged.fontSize,
   };
 }
 
@@ -276,7 +267,6 @@ async function main() {
   const { templatePath, overrides } = parseCliArgs(Bun.argv.slice(2));
 
   let templateConfig: Partial<RenderConfig> = {};
-  const resolvedTemplatePath = templatePath ?? join(process.cwd(), "render.yaml");
 
   if (templatePath) {
     if (!existsSync(templatePath)) {
@@ -285,16 +275,12 @@ async function main() {
     }
     console.log(`  Template: ${templatePath}`);
     templateConfig = loadTemplate(templatePath);
-  } else if (existsSync(resolvedTemplatePath) && !overrides.notebookPath) {
-    console.log(`  Template: ${resolvedTemplatePath}`);
-    templateConfig = loadTemplate(resolvedTemplatePath);
   }
 
   const config = resolveConfig(templateConfig, overrides);
 
   if (!config.notebookPath) {
-    console.error("  No notebook specified. Pass a .ipynb file or create a render.yaml template.");
-    console.error("  Run: ntui init");
+    console.error("  No notebook specified. Usage: ntui render <notebook.ipynb> [opts]");
     process.exit(1);
   }
 
@@ -309,6 +295,7 @@ async function main() {
   console.log(`  Output:     ${absOutput}`);
   console.log(`  Animation:  ${config.animationMode}`);
   console.log(`  Resolution: ${config.width}x${config.height} @ ${config.fps}fps`);
+  if (config.fontSize) console.log(`  Font size:  ${config.fontSize}px`);
 
   // --- Step 1: Capture or use cache ---
   const notebookHash = await hashFile(config.notebookPath);
@@ -327,6 +314,13 @@ async function main() {
   } else {
     console.log(`\n  --force: re-executing notebook...`);
     propsJson = await executeAndCache(config, cacheKey);
+  }
+
+  // Inject render-time settings (fontSize) into props regardless of cache
+  {
+    const parsed = JSON.parse(propsJson);
+    if (config.fontSize) parsed.fontSize = config.fontSize;
+    propsJson = JSON.stringify(parsed, null, 2);
   }
 
   await Bun.write(PROPS_PATH, propsJson);

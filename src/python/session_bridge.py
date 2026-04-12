@@ -13,8 +13,14 @@ from typing import Optional
 
 
 def write_message(payload: dict) -> None:
-    sys.stdout.write(json.dumps(payload) + "\n")
-    sys.stdout.flush()
+    # Use sys.__stdout__ unconditionally so protocol messages bypass any
+    # contextlib.redirect_stdout in effect during cell execution. Otherwise
+    # an emit_output() during a redirected block would be captured by the
+    # stdout wrapper and re-emitted as a stream output containing the JSON
+    # event itself (e.g. literal expressions showing their {"event": ...}
+    # wrapper instead of the value).
+    sys.__stdout__.write(json.dumps(payload) + "\n")
+    sys.__stdout__.flush()
 
 
 def stderr_text(output: dict) -> str:

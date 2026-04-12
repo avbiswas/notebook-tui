@@ -60,14 +60,17 @@ export const MarkdownCell: React.FC<{
   source: string;
   focused: boolean;
   focusFrame: number;
+  typingFrame?: number;
   index: number;
   total: number;
   scale?: number;
-}> = ({ source, focused, focusFrame, index, total, scale: s = 1 }) => {
+  fontSize?: number;
+}> = ({ source, focused, focusFrame, typingFrame, index, total, scale: s = 1, fontSize = 16 }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
   const hasFocused = focusFrame >= 0;
+  const entranceStart = typingFrame ?? focusFrame;
 
   const html = useMemo(() => {
     return marked.parse(source || "*empty*") as string;
@@ -77,7 +80,7 @@ export const MarkdownCell: React.FC<{
 
   // Entrance animation: fade + slide up when focused
   const entrance = hasFocused
-    ? spring({ frame, fps, delay: focusFrame, config: { damping: 200 } })
+    ? spring({ frame, fps, delay: entranceStart, config: { damping: 200 } })
     : 0;
   const opacity = interpolate(entrance, [0, 1], [0, 1]);
   const translateY = interpolate(entrance, [0, 1], [12 * s, 0]);
@@ -99,8 +102,8 @@ export const MarkdownCell: React.FC<{
         className="md-cell"
         style={{
           color: monokai.text,
-          fontSize: 14 * s,
-          lineHeight: `${20 * s}px`,
+          fontSize: (fontSize - 2) * s,
+          lineHeight: `${Math.round(fontSize * 1.25) * s}px`,
           fontFamily: '"Inter", "Helvetica Neue", sans-serif',
         }}
         dangerouslySetInnerHTML={{ __html: html }}

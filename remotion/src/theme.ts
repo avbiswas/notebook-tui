@@ -9,7 +9,7 @@ export const monokai = {
   accent: "#66d9ef",
   success: "#a6e22e",
   warning: "#fd971f",
-  error: "#f92672",
+  error: "#e5a0a0",
   statusBg: "#111111",
   keyword: "#f92672",
   string: "#e6db74",

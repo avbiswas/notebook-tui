@@ -44,14 +44,15 @@ const HELP = `
       :q                    Quit
 
   Render:
-    ntui render                           Render using ./render.yaml
-    ntui render <notebook.ipynb>          Render specific notebook
-    ntui render config.yaml               Render using template file
-    ntui render notebook.ipynb -o out.mp4 Render with custom output
+    ntui render <notebook.ipynb>                         Render notebook to video
+    ntui render notebook.ipynb -o out.mp4                Render with custom output
+    ntui render notebook.ipynb --template template.yaml  Render with template settings
 
     Render options:
       -o, --output <path>   Output video path (default: out/video.mp4)
+      --template <path>     Load render settings from YAML template
       --animation <mode>    char | word | line | block | present (default: char)
+      --font-size <n>       Base font size in px (default: 16)
       --quality <preset>    sd | hd | 4k (default: hd)
       --aspect <ratio>      horizontal | vertical | square (default: horizontal)
       --force, -f           Re-execute notebook (ignore cache)
@@ -77,7 +78,8 @@ const HELP = `
   Examples:
     ntui analysis.ipynb
     ntui render analysis.ipynb --animation line --venv .venv
-    ntui init && vim render.yaml && ntui render
+    ntui render analysis.ipynb -o out.mp4 --template template.yaml
+    ntui init && vim render.yaml && ntui render notebook.ipynb --template render.yaml
 `;
 
 // ── Dispatch ───────────────────────────────────────────────────────

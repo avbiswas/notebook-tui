@@ -36,7 +36,7 @@ export const themes: Record<ThemeName, AppTheme> = {
     accent: "#66d9ef",
     success: "#a6e22e",
     warning: "#fd971f",
-    error: "#f92672",
+    error: "#e5a0a0",
     statusBarBg: "#111111",
     statusBarText: "#f8f8f2",
   },

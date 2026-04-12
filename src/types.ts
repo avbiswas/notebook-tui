@@ -62,10 +62,14 @@ export type Cursor = {
 
 export type ThemeName = "monokai";
 
+export type FocusTarget = "editor" | "output";
+
 export type UIState = {
   mode: AppMode;
   notebookPath: string | null;
   focusedCellId: string;
+  lastVisitedCellId: string | null;
+  focusTarget: FocusTarget;
   cursorByCellId: Record<string, Cursor>;
   selectionAnchorCellId: string | null;
   selectionAnchorCursor: Cursor | null;
@@ -89,6 +93,8 @@ export type UIState = {
   commandBuffer: string;
   statusMessage: string;
   themeName: ThemeName;
+  helpOpen: boolean;
+  outputDialogCellId: string | null;
 };
 
 export type KernelStatus = "starting" | "idle" | "busy" | "error" | "stopped";

@@ -11,14 +11,43 @@ import type {
   NotebookOutput,
 } from "./types";
 
+// Ordered list of CLI clipboard writers to try, per platform. The first one
+// that spawns successfully wins — this lets the same build work on macOS,
+// Linux (x11/wayland), and Windows without runtime probing of every tool.
+function clipboardCommands(): string[][] {
+  if (process.platform === "darwin") {
+    return [["pbcopy"]];
+  }
+  if (process.platform === "win32") {
+    return [["clip"]];
+  }
+  return [
+    ["wl-copy"],
+    ["xclip", "-selection", "clipboard"],
+    ["xsel", "--clipboard", "--input"],
+  ];
+}
+
 function writeSystemClipboard(data: ClipboardData): void {
   const text =
     data.kind === "text"
       ? data.text
       : data.cells.map((cell) => cell.source).join("\n\n");
-  const proc = spawn(["pbcopy"], { stdin: "pipe" });
-  proc.stdin.write(text);
-  proc.stdin.end();
+
+  for (const command of clipboardCommands()) {
+    try {
+      const proc = spawn(command, {
+        stdin: "pipe",
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      proc.stdin.write(text);
+      proc.stdin.end();
+      return;
+    } catch {
+      // Binary is probably missing; fall through to the next candidate.
+    }
+  }
 }
 
 function cloneDocument(document: NotebookDocument): NotebookDocument {
@@ -97,6 +126,8 @@ export function createAppStateFromDocument(
       mode: "normal",
       notebookPath,
       focusedCellId,
+      lastVisitedCellId: null,
+      focusTarget: "editor",
       cursorByCellId,
       selectionAnchorCellId: null,
       selectionAnchorCursor: null,
@@ -105,8 +136,10 @@ export function createAppStateFromDocument(
       lastFind: null,
       commandBuffer: "",
       statusMessage:
-        "Normal mode. i insert, r run, V line select, <Space>vv cell select.",
+        "Normal mode. Press H for shortcuts.",
       themeName: "monokai",
+      helpOpen: false,
+      outputDialogCellId: null,
     },
     kernel: {
       status: "starting",
@@ -372,6 +405,9 @@ export function moveFocusToRelativeCell(state: AppState, delta: number): AppStat
     ui: {
       ...state.ui,
       focusedCellId: nextCellId,
+      lastVisitedCellId:
+        nextCellId !== state.ui.focusedCellId ? state.ui.focusedCellId : state.ui.lastVisitedCellId,
+      focusTarget: "editor",
       selectionAnchorCellId,
       selectionAnchorCursor:
         state.ui.mode === "visual" ? state.ui.selectionAnchorCursor : null,
@@ -872,14 +908,42 @@ export function insertCellRelative(state: AppState, delta: 0 | 1): AppState {
     },
     {
       focusedCellId: nextId,
+      lastVisitedCellId: state.ui.focusedCellId,
+      focusTarget: "editor",
       mode: "insert",
       cursorByCellId: { ...state.ui.cursorByCellId, [nextId]: { row: 0, col: 0 } },
       statusMessage: "Inserted a new cell.",
       selectionAnchorCellId: null,
       selectionAnchorCursor: null,
       pendingMotion: null,
+      helpOpen: false,
+      outputDialogCellId: null,
     },
   );
+}
+
+export function insertLineBelow(state: AppState): AppState {
+  return mapFocusedCell(state, (cell, cursor) => {
+    const lines = getLines(cell.source);
+    const insertionRow = cursor.row + 1;
+    lines.splice(insertionRow, 0, "");
+    return {
+      cell: { ...cell, source: sourceFromLines(lines) },
+      cursor: { row: insertionRow, col: 0 },
+    };
+  });
+}
+
+export function insertLineAbove(state: AppState): AppState {
+  return mapFocusedCell(state, (cell, cursor) => {
+    const lines = getLines(cell.source);
+    const insertionRow = cursor.row;
+    lines.splice(insertionRow, 0, "");
+    return {
+      cell: { ...cell, source: sourceFromLines(lines) },
+      cursor: { row: insertionRow, col: 0 },
+    };
+  });
 }
 
 export function toggleCellKind(state: AppState): AppState {
@@ -1201,11 +1265,69 @@ export function deleteSelectedCells(state: AppState): AppState {
     },
     {
       focusedCellId: nextFocusedCellId,
+      lastVisitedCellId:
+        nextFocusedCellId !== state.ui.focusedCellId ? state.ui.focusedCellId : state.ui.lastVisitedCellId,
+      focusTarget: "editor",
       cursorByCellId: nextCursorByCellId,
       statusMessage: "Deleted selected cell(s).",
       mode: "normal",
       selectionAnchorCellId: null,
       selectionAnchorCursor: null,
+      pendingMotion: null,
+    },
+  );
+}
+
+export function deleteFocusedCellAndRestorePrevious(state: AppState): AppState {
+  if (state.notebook.present.cells.length === 1) {
+    return applyNotebookMutation(
+      state,
+      (document) => {
+        document.cells[0] = createCell(state.ui.focusedCellId, "");
+      },
+      {
+        focusedCellId: state.ui.focusedCellId,
+        lastVisitedCellId: null,
+        focusTarget: "editor",
+        statusMessage: "Cleared the last remaining cell.",
+        mode: "normal",
+        selectionAnchorCellId: null,
+        selectionAnchorCursor: null,
+        pendingMotion: null,
+      },
+    );
+  }
+
+  const currentCellId = state.ui.focusedCellId;
+  const remainingCells = state.notebook.present.cells.filter((cell) => cell.id !== currentCellId);
+  const preferredFocusId = state.ui.lastVisitedCellId
+    ? remainingCells.find((cell) => cell.id === state.ui.lastVisitedCellId)?.id ?? null
+    : null;
+  const currentIndex = getCellIndex(state, currentCellId);
+  const fallbackFocusId =
+    remainingCells[Math.max(0, Math.min(currentIndex, remainingCells.length - 1))]?.id ??
+    remainingCells[0]?.id ??
+    currentCellId;
+  const nextFocusedCellId = preferredFocusId ?? fallbackFocusId;
+  const nextCursorByCellId = Object.fromEntries(
+    Object.entries(state.ui.cursorByCellId).filter(([cellId]) => cellId !== currentCellId),
+  );
+
+  return applyNotebookMutation(
+    state,
+    (document) => {
+      document.cells = document.cells.filter((cell) => cell.id !== currentCellId);
+    },
+    {
+      focusedCellId: nextFocusedCellId,
+      lastVisitedCellId: currentCellId,
+      focusTarget: "editor",
+      cursorByCellId: nextCursorByCellId,
+      statusMessage: "Deleted cell.",
+      mode: "normal",
+      selectionAnchorCellId: null,
+      selectionAnchorCursor: null,
+      pendingOperator: null,
       pendingMotion: null,
     },
   );
@@ -1224,6 +1346,9 @@ export function moveFocusToBoundary(state: AppState, edge: "start" | "end"): App
     ui: {
       ...state.ui,
       focusedCellId: nextCellId,
+      lastVisitedCellId:
+        nextCellId !== state.ui.focusedCellId ? state.ui.focusedCellId : state.ui.lastVisitedCellId,
+      focusTarget: "editor",
       pendingOperator: null,
       pendingMotion: null,
       selectionAnchorCellId:
