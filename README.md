@@ -2,6 +2,14 @@
 
 Terminal-native Jupyter notebook editor and video renderer. Edit notebooks in a vim-style TUI, then render animated walkthroughs to MP4.
 
+### Rendered video output
+
+https://github.com/user-attachments/assets/4b0a86fa-5c2f-4700-8556-d17f71745e5f
+
+### Terminal editor
+
+https://github.com/user-attachments/assets/3299962d-ad89-435f-aa4c-4f8c782558d3
+
 Built with Bun, OpenTUI, and Remotion.
 
 ## Install

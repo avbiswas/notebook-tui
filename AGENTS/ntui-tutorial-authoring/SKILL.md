@@ -1,46 +1,121 @@
 ---
 name: ntui-tutorial-authoring
-description: Create and refine `ntui` tutorial notebooks and render plans. Use when authoring `# ntui:` directives, preview layouts, labels, highlights, callouts, or compact demo notebooks for rendered walkthroughs.
+description: Create polished tutorial notebooks for animated video rendering with notebook-tui (ntui). Use when the user wants to author Jupyter notebooks in the terminal, add ntui directives for highlights/labels/callouts/previews, or produce animated code walkthrough videos. Triggers on "ntui", "notebook-tui", "notebook tui", "jupyter notebook in terminal", "render notebook", "code walkthrough video", "animated notebook", "tutorial notebook", "ntui render", "ntui directives".
 ---
 
 # ntui Tutorial Authoring
 
-Use this skill when working on tutorial-style notebooks meant for `ntui render`.
+Help users create Jupyter notebooks designed for animated video rendering with `ntui`.
 
-## Focus
+## What is ntui
 
-- Keep demo notebooks small and fast to render.
-- Prefer `# ntui:` directives that are easy to read and compose.
-- Use labels, highlights, callouts, and previews to teach one idea at a time.
-- Favor short source and short outputs unless a longer output is the point of the demo.
+notebook-tui (`ntui`) is a terminal-native Jupyter notebook editor with vim-style keybindings. Users edit `.ipynb` files in the terminal and can render them as animated MP4 walkthrough videos with typing animations, highlights, and overlays.
 
-## Workflow
+## When to Use This Skill
 
-1. Start from the teaching goal.
-2. Reduce the notebook to the smallest set of cells that demonstrates that goal.
-3. Add `# ntui:` directives only for the effect being tested.
-4. Verify the sequence reads well in render order:
-   source, emphasis, output, preview, restore, next cell.
+- User wants to create a notebook meant for video rendering
+- User asks about `# ntui:` directives
+- User wants to add labels, highlights, callouts, or previews to notebook cells
+- User is planning a code tutorial or walkthrough video
+- User mentions "ntui", "notebook-tui", "jupyter notebook in terminal"
 
-## Good Patterns
+## ntui Rendering Directives
+
+Add `# ntui: key=value` comment lines at the top of a code cell. These are hidden in the rendered video.
+
+### Available Directives
+
+| Directive | Example | Purpose |
+|-----------|---------|---------|
+| `label` | `label="Parsing"` | Title shown in the video overlay |
+| `id` | `id=parse` | Symbolic cell id for cross-references |
+| `highlight` | `highlight=3-5` | Highlight source lines (1-indexed, comma-separated ranges) |
+| `highlight_focus` | `highlight_focus=4` | Emphasize specific lines within the highlight |
+| `callout` | `callout="Key insight"` | Banner text displayed during preview |
+| `source=preview` | | Show this cell's source in a preview overlay |
+| `output=preview` | | Show this cell's output in a preview overlay |
+| `preview` | `preview=@,@o,2o` | Preview specific targets (`@` = this cell, `2` = cell 2, `o` suffix = output) |
+| `preview_layout` | `preview_layout=columns` | Layout: `center`, `columns`, `rows`, `grid`, `main_rail` |
+| `input` | `input=fade` | Animation style: `char`, `word`, `line`, `block`, `fade`, `present` |
+
+### Animation Modes (per-cell `input=`)
+
+- `char` — character-by-character typing (default)
+- `word` — word-by-word typing
+- `line` — line-by-line reveal
+- `block` — entire source appears instantly
+- `fade` — instant reveal with fade-in effect
+- `present` — all code visible from the start, minimal delay
+
+## Authoring Guidelines
+
+1. **Start from the teaching goal.** Each cell should demonstrate one concept.
+2. **Keep notebooks small.** Fewer cells render faster and are easier to follow.
+3. **Use labels for chapter headings.** `label="Step 1: Setup"` appears as an overlay title.
+4. **Highlight sparingly.** Draw attention to the 1-3 lines that matter most.
+5. **Use callouts for key insights.** Short text like `callout="This returns a generator"`.
+6. **Prefer short outputs.** Long outputs slow the video; truncate or filter when possible.
+7. **Use `input=fade` for boilerplate.** Skip typing animation on import blocks or setup code.
+8. **Preview code+output together.** `preview=@,@o preview_layout=columns` shows source alongside result.
+
+## Example Patterns
+
+### Simple labeled cell with highlight
 
 ```python
-# ntui: label="Parse"
+# ntui: label="Data Loading"
 # ntui: highlight=3-4 highlight_focus=4
+import pandas as pd
+
+df = pd.read_csv("data.csv")
+df.head()
 ```
+
+### Side-by-side code and output preview
 
 ```python
 # ntui: preview=@,@o preview_layout=columns
-# ntui: callout="Compare code and result"
+# ntui: callout="Compare input and output"
+result = transform(data)
+print(result)
 ```
+
+### Cross-referencing cells
 
 ```python
 # ntui: id=parse
-# ntui: preview=parse,parseo,@o preview_layout=grid
+# ntui: label="Parser"
+def parse(text):
+    return ast.parse(text)
 ```
 
-## Guardrails
+```python
+# ntui: preview=parse,parseo,@o preview_layout=grid
+# ntui: callout="Parser output vs our output"
+output = parse(sample_code)
+```
 
-- Do not add long explanatory prose to notebooks when a `label` or `callout` is enough.
-- Do not use multi-cell demos when one or two cells can show the effect.
-- If a preview is used, make sure the inline state still makes sense before and after the preview.
+### Skip typing for boilerplate
+
+```python
+# ntui: input=fade
+import numpy as np
+import matplotlib.pyplot as plt
+from pathlib import Path
+```
+
+## Rendering Commands
+
+```bash
+ntui render notebook.ipynb                          # default: char animation, HD, horizontal
+ntui render notebook.ipynb --animation line          # line-by-line globally
+ntui render notebook.ipynb --quality 4k --aspect vertical  # vertical 4K (e.g. for mobile/social)
+ntui render notebook.ipynb -o walkthrough.mp4        # custom output path
+```
+
+## Tips
+
+- Run `ntui notebook.ipynb` to edit and test the notebook interactively first
+- Press `Space ?` or `Shift+H` in the TUI for the full keybinding reference
+- Use `:w` to save, `R` to run a cell, `Shift+M` to toggle code/markdown
+- The `# ntui:` lines are only used during `ntui render` — they are ignored during normal editing
