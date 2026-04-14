@@ -1,6 +1,9 @@
 import React from "react";
-import { AbsoluteFill, interpolate, spring, useCurrentFrame, useVideoConfig } from "remotion";
+import { AbsoluteFill, interpolate, useCurrentFrame, useVideoConfig } from "remotion";
 import { monokai } from "./theme";
+
+const ANIM_INTRO_SECONDS = 0.5;
+const ANIM_OUTRO_SECONDS = 0.5;
 
 export const PreviewOverlay: React.FC<{
   visible: boolean;
@@ -12,24 +15,30 @@ export const PreviewOverlay: React.FC<{
   subtitle?: string;
   callout?: string;
   children: React.ReactNode;
-}> = ({ visible, startFrame, endFrame = null, exitDurationFrames = 12, scale: s = 1, title, subtitle, callout, children }) => {
+}> = ({ visible, startFrame, endFrame = null, exitDurationFrames = 15, scale: s = 1, title, subtitle, callout, children }) => {
   const frame = useCurrentFrame();
   const { fps, width, height } = useVideoConfig();
 
-  const entrance = visible
-    ? spring({ frame, fps, delay: startFrame, config: { damping: 200 } })
-    : 0;
-  const exiting = endFrame !== null && frame >= endFrame;
-  const exitProgress = exiting
-    ? spring({ frame, fps, delay: endFrame, durationInFrames: exitDurationFrames, config: { damping: 200 } })
-    : 0;
-  const backdropOpacity = interpolate(entrance, [0, 1], [0, 1]) * interpolate(exitProgress, [0, 1], [1, 0]);
-  const cardOpacity = interpolate(entrance, [0, 1], [0, 1]) * interpolate(exitProgress, [0, 1], [1, 0]);
-  const cardScaleIn = interpolate(entrance, [0, 1], [0.94, 1]);
-  const cardScaleOut = interpolate(exitProgress, [0, 1], [1, 0.96]);
-  const cardScale = cardScaleIn * cardScaleOut;
+  const introFrames = Math.round(ANIM_INTRO_SECONDS * fps);
+  const outroFrames = exitDurationFrames;
+
+  // Compute progress: 0→1 during intro, hold at 1, 1→0 during outro
+  let progress: number;
+  if (frame < startFrame) {
+    progress = 0;
+  } else if (frame < startFrame + introFrames) {
+    progress = (frame - startFrame) / Math.max(1, introFrames);
+  } else if (endFrame !== null && frame >= endFrame) {
+    progress = Math.max(0, 1 - (frame - endFrame) / Math.max(1, outroFrames));
+  } else {
+    progress = 1;
+  }
+
+  const backdropOpacity = progress;
+  const cardOpacity = progress;
+  const cardScaleIn = interpolate(progress, [0, 1], [0.94, 1]);
   const cardTranslateY =
-    interpolate(entrance, [0, 1], [22 * s, 0]) + interpolate(exitProgress, [0, 1], [0, 18 * s]);
+    interpolate(progress, [0, 1], [22 * s, 0]);
 
   if (!visible || cardOpacity <= 0.001) {
     return null;
@@ -63,7 +72,7 @@ export const PreviewOverlay: React.FC<{
           boxShadow: `0 26px 90px rgba(0, 0, 0, 0.5)`,
           padding: `${18 * s}px ${22 * s}px`,
           opacity: cardOpacity,
-          transform: `translateY(${cardTranslateY}px) scale(${cardScale})`,
+          transform: `translateY(${cardTranslateY}px) scale(${cardScaleIn})`,
           overflow: "hidden",
         }}
       >

@@ -141,3 +141,51 @@ export function getPreviewLayout(commands: NtuiCommandMap | undefined, targetCou
 export function getCellLabel(cell: Pick<CellState, "commands">): string | null {
   return cell.commands?.label ?? cell.commands?.chapter ?? null;
 }
+
+export type ArrowInfo = {
+  line: number;
+  highlightText?: string;
+  text: string;
+};
+
+export function parseArrowDirective(value: string | undefined): ArrowInfo | null {
+  if (!value) return null;
+
+  // New syntax: LINE|HIGHLIGHT_TEXT:"Annotation"
+  // e.g. "3|lr:"The learning rate"" → { line: 3, highlightText: "lr", text: "The learning rate" }
+  // Old syntax: LINE:"Annotation"
+  // e.g. "5:"Key line"" → { line: 5, highlightText: undefined, text: "Key line" }
+
+  const pipeIndex = value.indexOf("|");
+  let lineAndRest: string;
+  let highlightText: string | undefined;
+
+  if (pipeIndex > 0) {
+    // New syntax: LINE|HIGHLIGHT:TEXT
+    const linePart = value.slice(0, pipeIndex).trim();
+    const rest = value.slice(pipeIndex + 1);
+    lineAndRest = linePart;
+
+    // Parse rest as HIGHLIGHT:TEXT
+    const colonInRest = rest.indexOf(":");
+    if (colonInRest <= 0) return null;
+    highlightText = rest.slice(0, colonInRest).trim();
+    const annotationText = rest.slice(colonInRest + 1).trim();
+    if (!annotationText) return null;
+
+    const line = parseInt(linePart, 10);
+    if (!Number.isFinite(line) || line < 1) return null;
+    if (!highlightText) return null;
+    return { line, highlightText, text: annotationText };
+  }
+
+  // Old syntax: LINE:TEXT
+  const colonIndex = value.indexOf(":");
+  if (colonIndex <= 0) return null;
+  const lineStr = value.slice(0, colonIndex).trim();
+  const line = parseInt(lineStr, 10);
+  if (!Number.isFinite(line) || line < 1) return null;
+  const text = value.slice(colonIndex + 1).trim();
+  if (!text) return null;
+  return { line, text };
+}

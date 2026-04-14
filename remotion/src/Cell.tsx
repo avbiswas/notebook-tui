@@ -64,7 +64,7 @@ export const CellOutput: React.FC<{
   fontSize: number;
   maxOutputLines: number;
 }> = ({ output, scale: s, fontSize, maxOutputLines }) => {
-  const { width } = useVideoConfig();
+  const { width, height } = useVideoConfig();
   if (output.kind === "image" && output.data) {
     return (
       <div
@@ -135,7 +135,7 @@ export const CellOutput: React.FC<{
     output.kind === "result"
       ? (getStructuredResultLines(output.text, false) ?? getDisplayLines(output.text))
       : getDisplayLines(output.text);
-  const notebookWidth = Math.round(width * 0.625);
+  const notebookWidth = Math.round(width * (height > width ? 0.9 : 0.625));
   const outputWidth = Math.max(120, notebookWidth - (16 * 2 + 12 + 12) * s);
   const outputChars = Math.max(8, Math.floor(outputWidth / Math.max(1, fontSize * s * 0.62)));
   const wrappedLines: Array<string | FormattedOutputLine> = [];
@@ -257,6 +257,67 @@ export const PreviewSourcePanel: React.FC<{
   );
 };
 
+/**
+ * Renders a syntax-highlighted line with a highlighted text span (for arrow annotations).
+ * Splits tokens at the span boundaries and wraps the matching segment with a background.
+ */
+const ArrowHighlightLine: React.FC<{
+  tokens: { text: string; color: string }[];
+  spanStart: number;
+  spanEnd: number;
+  intensity: number;
+  scale: number;
+}> = ({ tokens, spanStart, spanEnd, intensity, scale: s }) => {
+  // Walk through tokens, splitting at spanStart/spanEnd boundaries
+  const segments: { text: string; color: string; highlighted: boolean }[] = [];
+  let charOffset = 0;
+
+  for (const tok of tokens) {
+    const tokEnd = charOffset + tok.text.length;
+    if (tokEnd <= spanStart || charOffset >= spanEnd) {
+      // Token is entirely outside the highlight span
+      segments.push({ text: tok.text, color: tok.color, highlighted: false });
+    } else {
+      // Token overlaps with the highlight span — split into up to 3 parts
+      const beforeLen = Math.max(0, spanStart - charOffset);
+      const afterLen = Math.max(0, tokEnd - spanEnd);
+      const highlightLen = tok.text.length - beforeLen - afterLen;
+
+      if (beforeLen > 0) {
+        segments.push({ text: tok.text.slice(0, beforeLen), color: tok.color, highlighted: false });
+      }
+      if (highlightLen > 0) {
+        segments.push({ text: tok.text.slice(beforeLen, beforeLen + highlightLen), color: tok.color, highlighted: true });
+      }
+      if (afterLen > 0) {
+        segments.push({ text: tok.text.slice(tok.text.length - afterLen), color: tok.color, highlighted: false });
+      }
+    }
+    charOffset = tokEnd;
+  }
+
+  return (
+    <>
+      {segments.map((seg, idx) => (
+        <span
+          key={idx}
+          style={{
+            color: seg.color,
+            background: seg.highlighted
+              ? `rgba(166, 226, 46, ${0.28 * intensity})`
+              : undefined,
+            borderRadius: seg.highlighted ? 3 * s : undefined,
+            padding: seg.highlighted ? `${0.5 * s}px ${2 * s}px` : undefined,
+            margin: seg.highlighted ? `0 ${-1 * s}px` : undefined,
+          }}
+        >
+          {seg.text}
+        </span>
+      ))}
+    </>
+  );
+};
+
 export const Cell: React.FC<{
   cell: CellState;
   index: number;
@@ -270,11 +331,13 @@ export const Cell: React.FC<{
   highlightRanges?: string;
   highlightFocusRanges?: string;
   highlightIntensity?: number;
+  arrowHighlight?: { line: number; text: string };
+  arrowIntensity?: number;
   scale?: number;
   fontSize?: number;
   collapsed?: boolean;
   maxOutputLines?: number;
-}> = ({ cell, index, total, focusFrame, typingFrame, outputFrame, animationMode = "char", sourceFade = false, inlineOutputVisible = true, highlightRanges, highlightFocusRanges, highlightIntensity = 1, scale: s = 1, fontSize = 16, collapsed = false, maxOutputLines = 10 }) => {
+}> = ({ cell, index, total, focusFrame, typingFrame, outputFrame, animationMode = "char", sourceFade = false, inlineOutputVisible = true, highlightRanges, highlightFocusRanges, highlightIntensity = 1, arrowHighlight, arrowIntensity = 0, scale: s = 1, fontSize = 16, collapsed = false, maxOutputLines = 10 }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
@@ -529,6 +592,12 @@ export const Cell: React.FC<{
                 remaining = 0;
               }
             }
+
+            // Compute arrow text-span highlight for this line
+            const arrowLineMatch = arrowHighlight && i + 1 === arrowHighlight.line && arrowIntensity > 0;
+            const arrowSpanStart = arrowLineMatch && arrowHighlight ? line.indexOf(arrowHighlight.text) : -1;
+            const arrowSpanEnd = arrowSpanStart >= 0 ? arrowSpanStart + arrowHighlight!.text.length : -1;
+
             return (
             <div key={i}>
               <div
@@ -545,9 +614,22 @@ export const Cell: React.FC<{
                     lineInRanges(i + 1, focusedHighlights)
                       ? `${3 * s}px solid rgba(166, 226, 46, ${highlightIntensity})`
                       : `${3 * s}px solid transparent`,
+                  borderBottom: arrowSpanStart >= 0
+                    ? `${2 * s}px solid rgba(166, 226, 46, ${arrowIntensity})`
+                    : undefined,
                 }}
               >
-                <SyntaxLine tokens={clippedTokens} />
+                {arrowSpanStart >= 0 ? (
+                  <ArrowHighlightLine
+                    tokens={clippedTokens}
+                    spanStart={arrowSpanStart}
+                    spanEnd={arrowSpanEnd}
+                    intensity={arrowIntensity}
+                    scale={s}
+                  />
+                ) : (
+                  <SyntaxLine tokens={clippedTokens} />
+                )}
               </div>
               {cursorVisible && i === visibleLineCount - 1 && (
                 <span

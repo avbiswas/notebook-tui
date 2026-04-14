@@ -37,6 +37,8 @@ Add `# ntui: key=value` comment lines at the top of a code cell. These are hidde
 | `preview` | `preview=@,@o,2o` | Preview specific targets (`@` = this cell, `2` = cell 2, `o` suffix = output) |
 | `preview_layout` | `preview_layout=columns` | Layout: `center`, `columns`, `rows`, `grid`, `main_rail` |
 | `input` | `input=fade` | Animation style: `char`, `word`, `line`, `block`, `fade`, `present` |
+| `arrow` | `arrow=3\|lr:"The learning rate"` | Arrow annotation: highlights `lr` on line 3, shows callout text. Use `\|` to specify text to highlight within the line |
+| `skip` | `skip=true` | Execute cell but hide from video (useful for boilerplate) |
 
 ### Animation Modes (per-cell `input=`)
 
@@ -102,6 +104,25 @@ output = parse(sample_code)
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
+```
+
+### Arrow annotation explaining a parameter
+
+```python
+# ntui: label="Training Config" arrow=3:"The learning rate controls step size"
+model = Model(
+    lr=0.001,
+    epochs=100,
+)
+```
+
+### Hide boilerplate cells from video
+
+```python
+# ntui: skip=true
+import os
+import sys
+sys.path.insert(0, os.getcwd())
 ```
 
 ## Rendering Commands

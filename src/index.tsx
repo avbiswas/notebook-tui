@@ -522,58 +522,58 @@ function syncLayoutPositions(node: unknown): void {
 
 const SCROLL_MARGIN_ROWS = 2;
 
-// Find the renderable id we want to keep visible based on current focus.
-function getScrollTargetId(state: AppState): string | null {
-  const focusedCell = getFocusedCell(state);
-  if (!focusedCell) {
-    return null;
-  }
-  if (
-    focusedCell.kind === "code" &&
-    focusedCell.outputs.length > 0 &&
-    (
-      state.ui.runningCellId === focusedCell.id ||
-      focusedCell.outputs.some((output) => output.kind === "error")
-    )
-  ) {
-    return `output-${focusedCell.id}`;
-  }
-  return "cursor-line";
-}
-
-// Lazy scroll: only adjust scrollTop when the target is outside the viewport.
-// Uses real opentui-computed coordinates rather than estimated row counts so
-// it remains accurate regardless of cell wrapping, output overflow, or which
-// row the cursor sits on within a tall cell.
-function scrollFocusedIntoView(
+function prepareScrollLayout(
   scrollBox: ScrollBoxRenderable,
   rendererRoot: { calculateLayout: () => void } & object,
-  state: AppState,
 ): void {
-  const targetId = getScrollTargetId(state);
-  if (!targetId) {
-    return;
-  }
-
   try {
     rendererRoot.calculateLayout();
   } catch {
     // If layout fails for any reason, fall back to whatever stale data exists.
   }
   syncLayoutPositions(rendererRoot);
+}
 
-  let target = scrollBox.content.findDescendantById(targetId) as
+function findScrollableTarget(
+  scrollBox: ScrollBoxRenderable,
+  targetId: string,
+): { y: number; height: number } | null {
+  const target = scrollBox.content.findDescendantById(targetId) as
     | { y: number; height: number }
     | undefined;
+  return target ?? null;
+}
 
-  if (!target) {
-    const focusedCell = getFocusedCell(state);
-    if (focusedCell) {
-      target = scrollBox.content.findDescendantById(focusedCell.id) as
-        | { y: number; height: number }
-        | undefined;
-    }
+function revealFocusedCell(
+  scrollBox: ScrollBoxRenderable,
+  rendererRoot: { calculateLayout: () => void } & object,
+  state: AppState,
+): void {
+  const focusedCell = getFocusedCell(state);
+  if (!focusedCell) {
+    return;
   }
+  prepareScrollLayout(scrollBox, rendererRoot);
+  const target = findScrollableTarget(scrollBox, focusedCell.id);
+  if (!target) {
+    return;
+  }
+
+  const viewport = scrollBox.viewport;
+  const desiredTop = viewport.y + Math.max(1, Math.floor(viewport.height / 2) - 1);
+  const dy = target.y - desiredTop;
+
+  if (dy !== 0) {
+    scrollBox.scrollTo({ x: scrollBox.scrollLeft, y: Math.max(0, scrollBox.scrollTop + dy) });
+  }
+}
+
+function keepCursorVisible(
+  scrollBox: ScrollBoxRenderable,
+  rendererRoot: { calculateLayout: () => void } & object,
+): void {
+  prepareScrollLayout(scrollBox, rendererRoot);
+  const target = findScrollableTarget(scrollBox, "cursor-line");
   if (!target) {
     return;
   }
@@ -799,6 +799,7 @@ function App() {
   const scrollRef = useRef<ScrollBoxRenderable | null>(null);
   const helpScrollRef = useRef<ScrollBoxRenderable | null>(null);
   const outputDialogScrollRef = useRef<ScrollBoxRenderable | null>(null);
+  const previousFocusedCellIdRef = useRef<string | null>(null);
   const theme = themes[state.ui.themeName];
   const notebookWidth = Math.min(120, Math.max(72, width - 6));
   const statusBarHeight = 5;
@@ -860,7 +861,17 @@ function App() {
     if (!sb) {
       return;
     }
-    scrollFocusedIntoView(sb, renderer.root, state);
+    const previousFocusedCellId = previousFocusedCellIdRef.current;
+    const focusedCellChanged =
+      previousFocusedCellId !== null &&
+      previousFocusedCellId !== state.ui.focusedCellId;
+
+    if (focusedCellChanged) {
+      revealFocusedCell(sb, renderer.root, state);
+    } else {
+      keepCursorVisible(sb, renderer.root);
+    }
+    previousFocusedCellIdRef.current = state.ui.focusedCellId;
   }, [
     renderer,
     bodyHeight,
@@ -2235,7 +2246,11 @@ function App() {
 
   return (
     <box flexDirection="column" flexGrow={1} backgroundColor={theme.background}>
-      <scrollbox ref={scrollRef} height={bodyHeight} style={{ rootOptions: { backgroundColor: theme.background } }}>
+      <scrollbox
+        ref={scrollRef}
+        height={bodyHeight}
+        style={{ rootOptions: { backgroundColor: theme.background } }}
+      >
         <box
           flexDirection="column"
           alignItems="center"

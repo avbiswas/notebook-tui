@@ -59,25 +59,32 @@ export async function captureTimeline(opts: CaptureOptions): Promise<Timeline> {
     const parsedCommands = parseNtuiCommands(cell.source);
     const visibleSource = parsedCommands.bodySource;
 
-    events.push({ type: "focus", ts: ts(), cellIndex: i });
-    events.push({ type: "source", ts: ts(), cellIndex: i, source: visibleSource });
+    const isSkipped = parsedCommands.commands.skip === "true";
+
+    if (!isSkipped) {
+      events.push({ type: "focus", ts: ts(), cellIndex: i });
+      events.push({ type: "source", ts: ts(), cellIndex: i, source: visibleSource });
+    }
 
     if (cell.kind === "markdown") {
       console.log(`  [${i + 1}/${doc.cells.length}] Markdown cell (skipping execution)`);
-      events.push({
-        type: "complete",
-        ts: ts(),
-        cellIndex: i,
-        executionCount: 0,
-        error: null,
-      });
+      if (!isSkipped) {
+        events.push({
+          type: "complete",
+          ts: ts(),
+          cellIndex: i,
+          executionCount: 0,
+          error: null,
+        });
+      }
       continue;
     }
 
-    console.log(`  [${i + 1}/${doc.cells.length}] Running cell...`);
+    console.log(`  [${i + 1}/${doc.cells.length}]${isSkipped ? " (skip)" : ""} Running cell...`);
 
     try {
       await executeNotebookCell(session, cell.source, (event) => {
+        if (isSkipped) return;
         if (event.type === "output") {
           events.push({
             type: "output",
@@ -97,13 +104,15 @@ export async function captureTimeline(opts: CaptureOptions): Promise<Timeline> {
         });
       });
     } catch (error) {
-      events.push({
-        type: "complete",
-        ts: ts(),
-        cellIndex: i,
-        executionCount: 0,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      if (!isSkipped) {
+        events.push({
+          type: "complete",
+          ts: ts(),
+          cellIndex: i,
+          executionCount: 0,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
   }
 

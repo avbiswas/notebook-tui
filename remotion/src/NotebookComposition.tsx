@@ -15,8 +15,9 @@ import { Cell, CellOutput, PreviewSourcePanel, buildTypingSchedule } from "./Cel
 import { MarkdownCell } from "./MarkdownCell";
 import { PreviewOverlay } from "./PreviewOverlay";
 import { LabelBanner } from "./LabelBanner";
+import { ArrowAnnotation } from "./ArrowAnnotation";
 import type { Timeline, CellState, TimelineEvent, AnimationMode } from "./types";
-import { getCellLabel, getPreviewLayout, resolvePreviewTargets, type PreviewTargetRef } from "./ntui";
+import { getCellLabel, getPreviewLayout, resolvePreviewTargets, parseArrowDirective, type PreviewTargetRef } from "./ntui";
 
 export type NotebookProps = {
   timeline: Timeline;
@@ -27,11 +28,16 @@ export type NotebookProps = {
 };
 
 const SCROLL_SETTLE_SECONDS = 0.5;
-const PREVIEW_DELAY_SECONDS = 0.7;
-const PREVIEW_EXIT_SECONDS = 0.45;
-const PREVIEW_MIN_VISIBLE_SECONDS = 2.0;
-const HIGHLIGHT_INTRO_SECONDS = 0.45;
-const HIGHLIGHT_OUTRO_SECONDS = 0.35;
+const PAUSE_AFTER_OUTPUT = 0.8;
+
+// Uniform animation cadence for all special overlays (highlights, previews, arrows, labels):
+// 1s pre-hold → 0.5s intro → 2s hold → 0.5s outro → 1s post-hold = 5s total
+const ANIM_PRE_HOLD_SECONDS = 1.0;
+const ANIM_INTRO_SECONDS = 0.5;
+const ANIM_HOLD_SECONDS = 2.0;
+const ANIM_OUTRO_SECONDS = 0.5;
+const ANIM_POST_HOLD_SECONDS = 1.0;
+const ANIM_TOTAL_SECONDS = ANIM_PRE_HOLD_SECONDS + ANIM_INTRO_SECONDS + ANIM_HOLD_SECONDS + ANIM_OUTRO_SECONDS + ANIM_POST_HOLD_SECONDS;
 
 function getCellAnimationMode(cell: Pick<CellState, "commands">, fallback: AnimationMode): AnimationMode {
   const inputMode = cell.commands?.input;
@@ -191,13 +197,9 @@ function buildFramePlan(
 ) {
   const PAUSE_AFTER_FOCUS = 0.3 + SCROLL_SETTLE_SECONDS;
   const MIN_STREAM_GAP = 0.3;
-  const PAUSE_AFTER_OUTPUT = 0.8;
   const INTRO_HOLD = 0.5;
   const OUTRO_HOLD = 2.0;
-  const HIGHLIGHT_INTRO_FRAMES = Math.round(HIGHLIGHT_INTRO_SECONDS * fps);
-  const HIGHLIGHT_OUTRO_FRAMES = Math.round(HIGHLIGHT_OUTRO_SECONDS * fps);
-  const PREVIEW_MIN_VISIBLE_FRAMES = Math.round(PREVIEW_MIN_VISIBLE_SECONDS * fps);
-  const PREVIEW_EXIT_FRAMES = Math.round(PREVIEW_EXIT_SECONDS * fps);
+  const ANIM_TOTAL_FRAMES = Math.round(ANIM_TOTAL_SECONDS * fps);
 
   // Track the last timestamp per cell to compute real time gaps
   const lastTsPerCell = new Map<number, number>();
@@ -251,16 +253,19 @@ function buildFramePlan(
         currentFrame += typingFrames;
       }
       if (hasHighlightCommands({ commands: cellCommands?.commands })) {
-        currentFrame += HIGHLIGHT_INTRO_FRAMES;
+        currentFrame += ANIM_TOTAL_FRAMES;
       }
     } else if (event.type === "complete") {
       currentFrame += Math.round(PAUSE_AFTER_OUTPUT * fps);
       const cellCommands = cells[event.cellIndex];
       if (hasPreviewCommands({ commands: cellCommands?.commands })) {
-        currentFrame += PREVIEW_MIN_VISIBLE_FRAMES + PREVIEW_EXIT_FRAMES;
+        currentFrame += ANIM_TOTAL_FRAMES;
       }
       if (hasHighlightCommands({ commands: cellCommands?.commands })) {
-        currentFrame += HIGHLIGHT_OUTRO_FRAMES;
+        currentFrame += ANIM_TOTAL_FRAMES;
+      }
+      if (cellCommands?.commands?.arrow) {
+        currentFrame += ANIM_TOTAL_FRAMES;
       }
     }
   }
@@ -465,11 +470,11 @@ export const NotebookComposition: React.FC<NotebookProps> = ({
   }));
 
   const scrollSettleFrames = Math.round(SCROLL_SETTLE_SECONDS * fps);
-  const previewDelayFrames = Math.round(PREVIEW_DELAY_SECONDS * fps);
-  const previewExitFrames = Math.round(PREVIEW_EXIT_SECONDS * fps);
-  const previewMinVisibleFrames = Math.round(PREVIEW_MIN_VISIBLE_SECONDS * fps);
-  const highlightIntroFrames = Math.round(HIGHLIGHT_INTRO_SECONDS * fps);
-  const highlightOutroFrames = Math.round(HIGHLIGHT_OUTRO_SECONDS * fps);
+  const animPreHoldFrames = Math.round(ANIM_PRE_HOLD_SECONDS * fps);
+  const animIntroFrames = Math.round(ANIM_INTRO_SECONDS * fps);
+  const animHoldFrames = Math.round(ANIM_HOLD_SECONDS * fps);
+  const animOutroFrames = Math.round(ANIM_OUTRO_SECONDS * fps);
+  const animPostHoldFrames = Math.round(ANIM_POST_HOLD_SECONDS * fps);
 
   // -1 means "never focused yet"
   // focusFrames = when the scroll starts (cell becomes focused)
@@ -544,6 +549,7 @@ export const NotebookComposition: React.FC<NotebookProps> = ({
   const sourceChars = maxCharsPerLine(sourceWidth, (fontSize + 1) * s);
 
   const cellHeights = cellStates.map((cell, i) => {
+    if (cell.commands?.skip === "true") return 0;
     const isCurrent = i === currentFocus;
     const hasFocused = focusFrames[i]! >= 0;
     const typeStart = typingFrames[i] ?? focusFrames[i] ?? 0;
@@ -561,19 +567,18 @@ export const NotebookComposition: React.FC<NotebookProps> = ({
           );
     const previewTargets = resolvePreviewTargets(timeline, i, cell.commands);
     const previewedOutput = previewContainsCurrentOutput(previewTargets, i) || shouldPreviewOutput(cell);
-    const previewStart = outputFrames[i] === null ? null : outputFrames[i]! + previewDelayFrames;
+    const previewStart = outputFrames[i] === null ? null : outputFrames[i]! + animPreHoldFrames;
     const previewEnd = nextFocusFrames[i];
-    const previewVisibleUntil = previewStart === null ? null : previewStart + previewMinVisibleFrames;
-    const highlightEnd = previewEnd === null ? null : previewEnd - highlightOutroFrames;
+    const previewOutroStart = previewStart === null ? null : previewStart + animIntroFrames + animHoldFrames;
     const previewCloseStart =
       previewEnd === null
         ? null
-        : Math.max(previewEnd - previewExitFrames - highlightOutroFrames, previewVisibleUntil ?? 0);
+        : Math.max(previewEnd - animOutroFrames - animPostHoldFrames, previewOutroStart ?? 0);
     const previewWindowActive =
       previewTargets.length > 0 &&
       previewStart !== null &&
       frame >= previewStart &&
-      (previewCloseStart == null || frame < previewCloseStart + previewExitFrames);
+      (previewCloseStart == null || frame < previewCloseStart + animOutroFrames);
     const cellMaxOutputLines = previewedOutput ? Number.MAX_SAFE_INTEGER : maxOutputLines;
     const outputHeight =
       previewWindowActive
@@ -603,15 +608,23 @@ export const NotebookComposition: React.FC<NotebookProps> = ({
   let scrollY = 0;
   if (currentFocus >= 0) {
     const cellTop = getCellTop(currentFocus);
-    const cellBottom = cellTop + cellHeights[currentFocus]!;
+    const cellHeight = cellHeights[currentFocus]!;
+    const cellBottom = cellTop + cellHeight;
     const topMargin = viewportHeight * 0.15;
     const bottomMargin = viewportHeight * 0.18;
+    const visibleArea = viewportHeight - topMargin - bottomMargin;
 
-    if (cellBottom > viewportHeight - bottomMargin) {
-      scrollY = Math.max(0, cellBottom - (viewportHeight - bottomMargin));
-    }
-    if (cellTop < scrollY + topMargin) {
+    if (cellHeight <= visibleArea) {
+      // Cell fits within viewport margins — prefer showing from the top,
+      // but shift down if the bottom would be clipped.
       scrollY = Math.max(0, cellTop - topMargin);
+      if (cellBottom > scrollY + viewportHeight - bottomMargin) {
+        scrollY = cellBottom - (viewportHeight - bottomMargin);
+      }
+    } else {
+      // Cell is taller than the viewport — always anchor to the bottom edge
+      // so the most recent content (output / cursor) stays visible.
+      scrollY = Math.max(0, cellBottom - (viewportHeight - bottomMargin));
     }
   }
 
@@ -630,18 +643,18 @@ export const NotebookComposition: React.FC<NotebookProps> = ({
   const statusBarHeight = Math.round(40 * s);
   let previewCellIndex: number | null = null;
   for (let i = 0; i < cellStates.length; i += 1) {
-    const previewStart = outputFrames[i] === null ? null : outputFrames[i]! + previewDelayFrames;
+    const previewStart = outputFrames[i] === null ? null : outputFrames[i]! + animPreHoldFrames;
     const previewEnd = nextFocusFrames[i];
-    const previewVisibleUntil = previewStart === null ? null : previewStart + previewMinVisibleFrames;
+    const previewOutroStart = previewStart === null ? null : previewStart + animIntroFrames + animHoldFrames;
     const previewCloseStart =
       previewEnd === null
         ? null
-        : Math.max(previewEnd - previewExitFrames - highlightOutroFrames, previewVisibleUntil ?? 0);
+        : Math.max(previewEnd - animOutroFrames - animPostHoldFrames, previewOutroStart ?? 0);
     if (
       resolvePreviewTargets(timeline, i, cellStates[i]!.commands).length > 0 &&
       previewStart !== null &&
       frame >= previewStart &&
-      (previewCloseStart == null || frame < previewCloseStart + previewExitFrames)
+      (previewCloseStart == null || frame < previewCloseStart + animOutroFrames)
     ) {
       previewCellIndex = i;
     }
@@ -649,18 +662,18 @@ export const NotebookComposition: React.FC<NotebookProps> = ({
   const previewCell = previewCellIndex === null ? null : cellStates[previewCellIndex]!;
   const previewStartFrame =
     previewCellIndex !== null && outputFrames[previewCellIndex] !== null
-      ? outputFrames[previewCellIndex]! + previewDelayFrames
+      ? outputFrames[previewCellIndex]! + animPreHoldFrames
       : 0;
   const previewEndFrame =
     previewCellIndex !== null
       ? (() => {
-          const previewStart = outputFrames[previewCellIndex] === null ? null : outputFrames[previewCellIndex]! + previewDelayFrames;
-          const previewVisibleUntil = previewStart === null ? null : previewStart + previewMinVisibleFrames;
+          const previewStart = outputFrames[previewCellIndex] === null ? null : outputFrames[previewCellIndex]! + animPreHoldFrames;
+          const previewOutroStart = previewStart === null ? null : previewStart + animIntroFrames + animHoldFrames;
           const nextFocus = nextFocusFrames[previewCellIndex];
           if (nextFocus == null) {
             return null;
           }
-          return Math.max(nextFocus - previewExitFrames - highlightOutroFrames, previewVisibleUntil ?? nextFocus);
+          return Math.max(nextFocus - animOutroFrames - animPostHoldFrames, previewOutroStart ?? nextFocus);
         })()
       : null;
   const previewTargets =
@@ -676,10 +689,38 @@ export const NotebookComposition: React.FC<NotebookProps> = ({
       return 0;
     }
     const firstRevealFrame = outputFrames[i] ?? completeFrames[i];
-    const startFrame = firstRevealFrame === null ? null : firstRevealFrame - highlightIntroFrames;
-    const endFrame = nextFocusFrames[i] === null ? null : nextFocusFrames[i]! - highlightOutroFrames;
-    return getHighlightIntensity(frame, startFrame, endFrame, highlightIntroFrames, highlightOutroFrames);
+    const startFrame = firstRevealFrame === null ? null : firstRevealFrame + animPreHoldFrames;
+    const endFrame = startFrame === null ? null : startFrame + animIntroFrames + animHoldFrames;
+    return getHighlightIntensity(frame, startFrame, endFrame, animIntroFrames, animOutroFrames);
   });
+
+  // Arrow annotation for the currently focused cell
+  const currentArrow = currentFocus >= 0 && !collapsedCells[currentFocus]
+    ? parseArrowDirective(cellStates[currentFocus]?.commands?.arrow)
+    : null;
+  const arrowStartFrame = currentArrow && completeFrames[currentFocus] !== null
+    ? completeFrames[currentFocus]! + animPreHoldFrames
+    : null;
+  const arrowEndFrame = arrowStartFrame !== null
+    ? arrowStartFrame + animIntroFrames + animHoldFrames
+    : null;
+  const arrowIntensity = currentArrow && arrowStartFrame !== null
+    ? getHighlightIntensity(frame, arrowStartFrame, arrowEndFrame, animIntroFrames, animOutroFrames)
+    : 0;
+  const arrowTargetY = currentArrow && currentFocus >= 0
+    ? (() => {
+        const cellBorderTop = 2 * s;
+        const cellPaddingTop = 12 * s;
+        const headerHeight = Math.round((fontSize - 1) * 1.4) * s + 8 * s;
+        const sourceLineHeight = Math.round(fontSize * 1.625) * s;
+        const sourceLineMargin = 2 * s;
+        return Math.round(24 * s) + getCellTop(currentFocus) - scrollY
+          + cellBorderTop + cellPaddingTop + headerHeight
+          + (currentArrow.line - 1) * (sourceLineHeight + sourceLineMargin)
+          + sourceLineHeight / 2;
+      })()
+    : 0;
+  const arrowConnectorX = (width + notebookWidth) / 2 + 12 * s;
 
   return (
     <AbsoluteFill
@@ -712,6 +753,7 @@ export const NotebookComposition: React.FC<NotebookProps> = ({
           }}
         >
           {cellStates.map((cell, i) => {
+            if (cell.commands?.skip === "true") return null;
             const hasFocused = focusFrames[i]! >= 0;
             const isCurrent = i === currentFocus;
             const isPast = currentFocus >= 0 && i < currentFocus && hasFocused;
@@ -744,24 +786,30 @@ export const NotebookComposition: React.FC<NotebookProps> = ({
                     inlineOutputVisible={
                       !previewContainsCurrentOutput(resolvePreviewTargets(timeline, i, cell.commands), i) ||
                       outputFrames[i] === null ||
-                      frame < outputFrames[i]! + previewDelayFrames ||
+                      frame < outputFrames[i]! + animPreHoldFrames ||
                       (() => {
-                        const previewStart = outputFrames[i] === null ? null : outputFrames[i]! + previewDelayFrames;
-                        const previewVisibleUntil = previewStart === null ? null : previewStart + previewMinVisibleFrames;
+                        const previewStart = outputFrames[i] === null ? null : outputFrames[i]! + animPreHoldFrames;
+                        const previewOutroStart = previewStart === null ? null : previewStart + animIntroFrames + animHoldFrames;
                         const previewCloseStart =
                           nextFocusFrames[i] === null
                             ? null
-                            : Math.max(nextFocusFrames[i]! - previewExitFrames - highlightOutroFrames, previewVisibleUntil ?? 0);
+                            : Math.max(nextFocusFrames[i]! - animOutroFrames - animPostHoldFrames, previewOutroStart ?? 0);
                         const previewRestoreAt =
                           previewCloseStart === null
                             ? null
-                            : previewCloseStart + previewExitFrames;
+                            : previewCloseStart + animOutroFrames;
                         return previewRestoreAt !== null && frame >= previewRestoreAt;
                       })()
                     }
                     highlightRanges={cell.commands?.highlight}
                     highlightFocusRanges={cell.commands?.highlight_focus}
                     highlightIntensity={highlightIntensityByCell[i]!}
+                    arrowHighlight={
+                      i === currentFocus && currentArrow && currentArrow.highlightText && arrowIntensity > 0
+                        ? { line: currentArrow.line, text: currentArrow.highlightText }
+                        : undefined
+                    }
+                    arrowIntensity={i === currentFocus ? arrowIntensity : 0}
                     scale={s}
                     fontSize={fontSize}
                     collapsed={isCollapsed}
@@ -783,7 +831,7 @@ export const NotebookComposition: React.FC<NotebookProps> = ({
           visible={true}
           startFrame={previewStartFrame}
           endFrame={previewEndFrame}
-          exitDurationFrames={previewExitFrames}
+          exitDurationFrames={animOutroFrames}
           scale={s}
           title={getCellLabel(previewCell) || "Preview"}
           callout={previewCell.commands?.callout}
@@ -798,6 +846,19 @@ export const NotebookComposition: React.FC<NotebookProps> = ({
             highlightIntensityByCell[previewCellIndex!] ?? 1,
           )}
         </PreviewOverlay>
+      ) : null}
+
+      {currentArrow && arrowStartFrame !== null ? (
+        <ArrowAnnotation
+          text={currentArrow.text}
+          targetY={arrowTargetY}
+          connectorX={arrowConnectorX}
+          startFrame={arrowStartFrame}
+          holdFrames={animHoldFrames}
+          endFrame={arrowEndFrame}
+          scale={s}
+          fontSize={fontSize}
+        />
       ) : null}
 
       <div
